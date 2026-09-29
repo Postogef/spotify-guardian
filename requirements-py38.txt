@@ -1,0 +1,10 @@
+# Dependencias do runtime do Windows 7/8 (Python 3.8.10). Versoes fixas.
+# O build.ps1 instala com --no-deps: a lista precisa estar completa.
+spotipy==2.26.0
+requests==2.32.4
+urllib3==2.2.3
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.15
+redis==6.1.1
+async-timeout==5.0.1

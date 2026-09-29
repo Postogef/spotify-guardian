@@ -1,0 +1,20 @@
+# NUNCA publicar credenciais nem login do Spotify
+config*.json
+*.json.bak
+.cache*
+*.cache_gef
+atualizacao_estado.json
+# pastas das instalacoes antigas de cada posto (tem config.json com senhas), e copias/zips delas
+SpotifyGuardian Gef*
+*.zip
+
+# logs
+*.log
+*.log.1
+
+# gerados pelo build.ps1
+build/
+build_cache/
+dist/
+__pycache__/
+*.pyc
