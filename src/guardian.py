@@ -42,7 +42,7 @@ import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth, SpotifyOauthError
 
-VERSAO = "2.0.0"
+VERSAO = "2.0.1"
 # "dono/repositorio" no GitHub de onde vem as atualizacoes. O build.ps1 preenche.
 REPO_ATUALIZACAO = ""
 
@@ -69,10 +69,21 @@ else:
 
 LOG_FILE = os.path.join(PASTA, "guardian.log")
 
+# Console com pagina de codigo antiga (cp850): caractere que nao existe nela
+# (emoji no nome da conta/aparelho) vira "?" em vez de derrubar o programa.
+for _saida in (sys.stdout, sys.stderr):
+    try:
+        _saida.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 
 def log(msg):
     linha = f"[{datetime.now():%d/%m/%Y %H:%M:%S}] {msg}"
-    print(linha, flush=True)
+    try:
+        print(linha, flush=True)
+    except Exception:
+        pass  # console fechado/sem suporte: o que vale e o arquivo
     try:
         # passou de 2 MB: guarda o antigo como guardian.log.1 e comeca outro
         if os.path.getsize(LOG_FILE) > 2 * 1024 * 1024:
@@ -131,9 +142,14 @@ try:
     PLAYLIST_URI   = normalizar_playlist(PLAYLIST_CFG)
     EMBARALHAR     = CFG.get("embaralhar", True)
     INTERVALO      = max(int(CFG.get("check_interval", 180)), 60)  # nunca menos que 60s
-    STARTUP_DELAY  = CFG.get("startup_delay", 0)
+    # numeros escritos como texto ("8") tambem valem; lixo da erro claro aqui
+    STARTUP_DELAY  = float(CFG.get("startup_delay") or 0)
     HORARIO_INICIO = CFG.get("horario_inicio", None)
     HORARIO_FIM    = CFG.get("horario_fim", None)
+    if HORARIO_INICIO is not None:
+        HORARIO_INICIO = int(HORARIO_INICIO)
+    if HORARIO_FIM is not None:
+        HORARIO_FIM = int(HORARIO_FIM)
     # Nome do aparelho do PC da loja como aparece no Spotify Connect (opcional).
     # Se vazio, usa o nome do computador.
     DISPOSITIVO    = (CFG.get("dispositivo") or "").strip()
@@ -946,9 +962,11 @@ def refazer_login():
         print(f"(se ninguem logar em {PRAZO_LOGIN // 60} min, o login antigo continua valendo)")
         me = conectar(cache_path=novo).me()
         os.replace(novo, CACHE)  # so troca o login antigo quando o novo deu certo
-        print()
-        print(f"Login OK: {me.get('display_name')} ({me.get('id')})")
-        log(f"Login do Spotify refeito: {me.get('display_name')} ({me.get('id')})")
+        try:
+            print()
+            log(f"Login do Spotify refeito: {me.get('display_name')} ({me.get('id')})")
+        except Exception:
+            pass  # o login ja foi gravado: nada aqui pode virar "ERRO no login"
     except Exception as e:
         print()
         print(f"ERRO no login: {resumo_erro(e)}")
@@ -982,7 +1000,7 @@ def main():
     elif not ATUALIZACAO_AUTO:
         log("Atualizacao automatica desligada no config.json.")
     if STARTUP_DELAY and not sem_espera:
-        log(f"Aguardando {STARTUP_DELAY}s de inicializacao...")
+        log(f"Aguardando {STARTUP_DELAY:g}s de inicializacao...")
         time.sleep(STARTUP_DELAY)
 
     sp = conectar()

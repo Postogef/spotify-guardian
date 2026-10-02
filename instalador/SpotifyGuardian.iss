@@ -103,6 +103,8 @@ var
   InstalouOk: Boolean;
   VoltouVersao: Boolean;       { o guardian novo nao abriu e a versao anterior voltou }
   VersaoAnterior: String;      { versao instalada antes (registro), para desfazer }
+  GuardianIniciado: Boolean;
+  NaoAbriu: Boolean;           { 1a instalacao: o guardian novo nao abriu; o antigo foi mantido }
 
 const
   ChaveDesinstalar = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3C2A51-6B7D-4E0A-9C1E-5A2B7D9E4F10}_is1';
@@ -169,7 +171,10 @@ begin
   end;
   if Exec(PastaApp + '\python\pythonw.exe', '"' + PastaApp + '\guardian.py" --sem-espera',
           PastaApp, SW_SHOWNORMAL, ewNoWait, Codigo) then
-    Log('Guardian iniciado.')
+  begin
+    GuardianIniciado := True;
+    Log('Guardian iniciado.');
+  end
   else
     Log('ERRO ao iniciar o guardian: ' + SysErrorMessage(Codigo));
 end;
@@ -423,19 +428,31 @@ begin
       ConfirmarInstalacao;
       Exit;
     end;
-    { agora sim: para os guardians antigos (de outras pastas) e abre o novo }
-    RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '"');
     IniciarGuardian;
-    { Atualizacao: so descarta a versao anterior se a nova abriu mesmo. Senao a
-      loja ficaria sem guardian e sem como receber a correcao (quem baixa as
-      atualizacoes e o proprio guardian). }
-    if DeveIniciar and (PythonGuardado <> '') and not GuardianSubiu(240) then
+    { So descarta o que funcionava (versao anterior ou guardian antigo de outra
+      pasta) depois que o novo abriu mesmo. Senao a loja ficaria sem guardian. }
+    if DeveIniciar and not GuardianSubiu(240) then
     begin
-      Log('O guardian novo nao abriu em 240 s: voltando para a versao anterior.');
       RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoPasta');
-      VoltouVersao := True;
-      Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
+      if PythonGuardado <> '' then
+      begin
+        Log('O guardian novo nao abriu em 240 s: voltando para a versao anterior.');
+        VoltouVersao := True;
+        Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
+      end;
+      { 1a instalacao: o guardian antigo nem foi parado; religa os atalhos dele }
+      Log('O guardian novo nao abriu em 240 s: mantendo o guardian antigo.');
+      RodarPS(PastaApp + '\migrar.ps1', '-Novo "' + PastaApp + '" -Modo Desfazer');
+      NaoAbriu := True;
+      GuardianIniciado := False;
+      ConfirmarInstalacao;
+      SuppressibleMsgBox('O Spotify Guardian novo nao abriu neste computador.' + #13#10 +
+        'O guardian antigo (se havia) continua funcionando.' + #13#10#13#10 +
+        'Veja o guardian.log na pasta ' + PastaApp, mbError, MB_OK, IDOK);
+      Exit;
     end;
+    { o novo abriu: agora sim para os guardians antigos (de outras pastas) }
+    RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoAntigos');
     ConfirmarInstalacao;
   end;
 end;
@@ -474,7 +491,7 @@ end;
 function GetCustomSetupExitCode: Integer;
 begin
   Result := 0;
-  if VoltouVersao then
+  if VoltouVersao or NaoAbriu then
     Result := 9;
 end;
 
@@ -482,7 +499,7 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if (PaginaCred <> nil) and (CurPageID = PaginaCred.ID) then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall);
-  if (CurPageID = wpFinished) and not FileExists(ExpandConstant('{app}\.cache_gef')) then
+  if (CurPageID = wpFinished) and GuardianIniciado and not FileExists(ExpandConstant('{app}\.cache_gef')) then
   begin
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
       'PRIMEIRO USO: o navegador vai abrir para o login do Spotify. ' +

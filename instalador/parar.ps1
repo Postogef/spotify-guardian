@@ -12,7 +12,9 @@
 #              elas mesmas: senao duas abertas juntas se matam e ninguem reabre
 #              o guardian). O instalador nao usa: la todas precisam fechar.
 # Compativel com o PowerShell 2.0 do Windows 7.
-param([int]$Exceto = 0, [string]$Pasta = '', [switch]$SoPasta, [switch]$SemAjudantes)
+#   -SoAntigos : o contrario do -SoPasta: para so os guardians de OUTRAS pastas
+#              (o instalador usa depois que o guardian novo ja abriu).
+param([int]$Exceto = 0, [string]$Pasta = '', [switch]$SoPasta, [switch]$SemAjudantes, [switch]$SoAntigos)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $WmiTravou = $false
@@ -45,9 +47,10 @@ foreach ($p in $lista) {
     $ehGuardianExe = ($nome -ieq 'guardian.exe') -and $exe -and (Test-Path -LiteralPath (Join-Path (Split-Path $exe) 'config.json'))
     if (-not ($ehGuardianPy -or $ehGuardianExe)) { continue }
     if ($SemAjudantes -and $cmd -match '\s--(reiniciar|relogin)\b') { continue }
-    if ($SoPasta -and $raiz) {
+    if (($SoPasta -or $SoAntigos) -and $raiz) {
         $daPasta = $exe.ToLower().StartsWith($raiz) -or $cmd.ToLower().Contains($raiz)
-        if (-not $daPasta) { continue }
+        if ($SoPasta -and -not $daPasta) { continue }
+        if ($SoAntigos -and $daPasta) { continue }
     }
     Stop-Process -Id $id -Force
     $parados += $id
@@ -55,7 +58,7 @@ foreach ($p in $lista) {
 
 # Plano B (WMI quebrado/travado: a lista vem vazia, pois nem este PowerShell aparece):
 # para os Pythons que rodam da pasta do guardian novo.
-if ($lista.Count -eq 0 -and $raiz) {
+if ($lista.Count -eq 0 -and $raiz -and -not $SoAntigos) {
     foreach ($proc in @(Get-Process -Name python, pythonw)) {
         if ($proc.Id -eq $Exceto -or $proc.Id -eq $PID) { continue }
         $caminho = [string]$proc.Path

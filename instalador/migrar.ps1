@@ -27,7 +27,7 @@ $Avisos = @()
 $WmiTravou = $false
 
 function Registrar([string]$texto) {
-    if ($Modo -ne 'Migrar') { return }
+    if ($Modo -eq 'Detectar') { return }
     $linha = '[' + (Get-Date -Format 'dd/MM/yyyy HH:mm:ss') + '] ' + $texto
     Add-Content -LiteralPath $ArqLog -Value $linha -Encoding UTF8
 }
@@ -64,6 +64,28 @@ function Listar-Processos([int]$segundos) {
     try { $saida = $ps.EndInvoke($h) } catch { }
     $ps.Dispose()
     if ($saida) { foreach ($item in $saida) { $item } }
+}
+
+# ---- Modo Desfazer: o guardian novo nao abriu na 1a instalacao; religa o antigo ----
+$PastaBackup = Join-Path $Novo 'atalhos_antigos'
+$ArqRuns = Join-Path $PastaBackup 'run_antigos.txt'
+if ($Modo -eq 'Desfazer') {
+    $inicio = [Environment]::GetFolderPath('Startup')
+    foreach ($lnk in @(Get-ChildItem -LiteralPath $PastaBackup -Filter '*.lnk' -Force)) {
+        Move-Item -LiteralPath $lnk.FullName -Destination (Join-Path $inicio $lnk.Name) -Force
+        Registrar ('Atalho antigo religado: ' + $lnk.Name)
+    }
+    if (Test-Path -LiteralPath $ArqRuns) {
+        foreach ($linhaRun in @([System.IO.File]::ReadAllLines($ArqRuns))) {
+            $partes = $linhaRun.Split("`t", 2)
+            if ($partes.Count -eq 2) {
+                Set-ItemProperty -LiteralPath $ChaveRun -Name $partes[0] -Value $partes[1]
+                Registrar ('Entrada Run religada: ' + $partes[0])
+            }
+        }
+        Remove-Item -LiteralPath $ArqRuns -Force
+    }
+    return
 }
 
 # ---- 1) atalhos nas pastas Inicializar (do usuario e de todos os usuarios) ----
@@ -228,7 +250,7 @@ if ($TemConfigNova) {
 }
 
 if ($AtalhosAntigos.Count -gt 0) {
-    $backup = Join-Path $Novo 'atalhos_antigos'
+    $backup = $PastaBackup
     $null = New-Item -ItemType Directory -Path $backup -Force
     foreach ($a in $AtalhosAntigos) {
         Move-Item -LiteralPath $a -Destination (Join-Path $backup (Split-Path $a -Leaf)) -Force
@@ -238,6 +260,8 @@ if ($AtalhosAntigos.Count -gt 0) {
 
 foreach ($nomeRun in $RunsAntigos) {
     $valor = (Get-ItemProperty -LiteralPath $ChaveRun -Name $nomeRun).$nomeRun
+    $null = New-Item -ItemType Directory -Path $PastaBackup -Force
+    [System.IO.File]::AppendAllText($ArqRuns, ($nomeRun + "`t" + $valor + "`r`n"))
     Remove-ItemProperty -LiteralPath $ChaveRun -Name $nomeRun
     if ((Get-ItemProperty -LiteralPath $ChaveRun -Name $nomeRun)) {
         Registrar ('ERRO ao remover entrada antiga do Registro (Run): ' + $nomeRun)
