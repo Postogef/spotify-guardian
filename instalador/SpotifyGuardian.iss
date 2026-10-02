@@ -11,7 +11,10 @@
 ;     (pasta copiada na mao) e desativa o atalho antigo da inicializacao.
 ;   - Em maquina nova, pede client_id / client_secret / playlist.
 ;   - Coloca o guardian na inicializacao do Windows e ja deixa rodando.
-; Parametros extras: /SEMINICIAR (nao abre o guardian no fim; usado nos testes).
+;   - Se o guardian antigo estiver na inicializacao de TODOS os usuarios, pede o
+;     aceite de administrador (UAC) so para tirar esse atalho. O resto nao precisa.
+; Parametros extras (usados nos testes): /SEMINICIAR (nao abre o guardian no fim) e
+; /PASTACOMUM=pasta (pasta "Inicializar de todos os usuarios" de mentira, sem UAC).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -143,6 +146,19 @@ begin
   Result := ExpandConstant('{tmp}\estado_migracao.txt');
 end;
 
+{ So para testes: /PASTACOMUM=pasta faz o papel da pasta Inicializar de todos os usuarios. }
+function ParamPastaComum: String;
+begin
+  Result := ExpandConstant('{param:PASTACOMUM|}');
+end;
+
+function ParamsMigrar(const Pasta, Modo: String): String;
+begin
+  Result := '-Novo "' + Pasta + '" -Modo ' + Modo;
+  if ParamPastaComum <> '' then
+    Result := Result + ' -PastaComum "' + ParamPastaComum + '"';
+end;
+
 function InitializeSetup: Boolean;
 begin
   Result := True;
@@ -208,7 +224,7 @@ begin
     begin
       ExtractTemporaryFile('migrar.ps1');
       RodarPS(ExpandConstant('{tmp}\migrar.ps1'),
-              '-Novo "' + WizardDirValue + '" -Modo Detectar -Estado "' + ArquivoEstado + '"');
+              ParamsMigrar(WizardDirValue, 'Detectar') + ' -Estado "' + ArquivoEstado + '"');
       if LoadStringFromFile(ArquivoEstado, Estado) then
         AchouConfig := Copy(Estado, 1, 3) = 'SIM';
     end;
@@ -406,6 +422,48 @@ begin
   CopiasAnteriores(2);
 end;
 
+{ O atalho do guardian antigo na pasta Inicializar de TODOS os usuarios so sai com
+  permissao de administrador. O instalador inteiro nao roda como administrador (a
+  atualizacao automatica pararia num pedido de permissao a cada versao): o aceite
+  do Windows (UAC) e pedido so para este passo, e so quando esse atalho existe.
+  Sem o aceite nada quebra: o guardian novo fecha o antigo sozinho a cada login. }
+procedure DesativarAntigoDeTodosOsUsuarios;
+var
+  Pendente, Params: String;
+  Codigo: Integer;
+begin
+  Pendente := PastaApp + '\pendente_admin.txt';
+  if not FileExists(Pendente) then
+    Exit;
+  Params := ParamsMigrar(PastaApp, 'Admin');
+  if ParamPastaComum <> '' then
+    RodarPS(PastaApp + '\migrar.ps1', Params)   { testes: pasta de mentira, nao precisa de UAC }
+  else
+  begin
+    if WizardSilent then
+    begin
+      Log('Guardian antigo na inicializacao de TODOS os usuarios: precisa de administrador (instalacao silenciosa: nao pedi).');
+      Exit;
+    end;
+    MsgBox('O Spotify Guardian antigo tambem esta na inicializacao de TODOS os usuarios deste computador.' + #13#10#13#10 +
+           'Para desativar, o Windows vai pedir permissao de administrador: clique em "Sim" na proxima janela.',
+           mbInformation, MB_OK);
+    if not ShellExec('runas', PowerShell,
+         '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + PastaApp + '\migrar.ps1" ' + Params,
+         '', SW_HIDE, ewWaitUntilTerminated, Codigo) then
+      Log('Permissao de administrador negada (ou falhou): ' + SysErrorMessage(Codigo));
+  end;
+  if FileExists(Pendente) then
+  begin
+    Log('O guardian antigo continua na inicializacao de todos os usuarios.');
+    SuppressibleMsgBox('Nao foi possivel tirar o guardian antigo da inicializacao de todos os usuarios.' + #13#10#13#10 +
+      'Nada para de funcionar: ele continua abrindo a cada login e o guardian novo fecha ele sozinho.' + #13#10 +
+      'Para resolver de vez, rode este instalador de novo e aceite a permissao.', mbError, MB_OK, IDOK);
+  end
+  else
+    Log('Guardian antigo de todos os usuarios desativado.');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Config: String;
@@ -414,7 +472,7 @@ begin
   begin
     Config := PastaApp + '\config.json';
     RodarPS(PastaApp + '\migrar.ps1',
-            '-Novo "' + PastaApp + '" -Modo Migrar -Estado "' + ArquivoEstado + '"');
+            ParamsMigrar(PastaApp, 'Migrar') + ' -Estado "' + ArquivoEstado + '"');
     if not FileExists(Config) and (PaginaCred <> nil) and EhHex32(Trim(PaginaCred.Values[0])) then
     begin
       if SaveStringToFile(Config, MontarConfig, False) then
@@ -442,7 +500,7 @@ begin
       end;
       { 1a instalacao: o guardian antigo nem foi parado; religa os atalhos dele }
       Log('O guardian novo nao abriu em 240 s: mantendo o guardian antigo.');
-      RodarPS(PastaApp + '\migrar.ps1', '-Novo "' + PastaApp + '" -Modo Desfazer');
+      RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
       NaoAbriu := True;
       GuardianIniciado := False;
       ConfirmarInstalacao;
@@ -454,6 +512,7 @@ begin
     { o novo abriu: agora sim para os guardians antigos (de outras pastas) }
     RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoAntigos');
     ConfirmarInstalacao;
+    DesativarAntigoDeTodosOsUsuarios;
   end;
 end;
 

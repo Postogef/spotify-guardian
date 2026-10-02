@@ -78,6 +78,7 @@ while ($parados.Count -gt 0 -and (Get-Date) -lt $limite) {
 }
 
 # Com o WMI travado, 'exit' ficaria esperando o runspace preso: sai na marra.
+Write-Output ('PARADOS=' + $parados.Count)   # o guardian le isso para anotar no log
 if ($WmiTravou) { [Environment]::Exit(2) }
 if ($lista.Count -eq 0) { exit 2 }  # WMI nao respondeu
 exit 0

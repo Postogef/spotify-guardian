@@ -8,6 +8,11 @@
 #                    instalacao/atualizacao, tira os atalhos antigos da
 #                    inicializacao e remove entradas antigas do Registro (Run).
 #                    Tudo fica anotado em <Novo>\instalacao.log.
+#                    Atalho antigo na pasta Inicializar de TODOS os usuarios so
+#                    sai com administrador: fica listado em <Novo>\pendente_admin.txt.
+#   -Modo Admin    : roda elevado (o instalador pede o aceite do Windows so para
+#                    este passo) e tira esses atalhos de todos os usuarios.
+#   -Modo Desfazer : o guardian novo nao abriu na 1a instalacao: religa o antigo.
 #
 # Nada e apagado: atalhos antigos vao para <Novo>\atalhos_antigos.
 # Compativel com o PowerShell 2.0 do Windows 7 (.NET 2.0).
@@ -15,7 +20,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Novo,
     [string]$Modo = 'Detectar',
     [string]$Estado = '',
-    [string[]]$Raizes = @()   # so para testes: onde procurar (padrao: C:\, Areas de Trabalho, Documentos, Downloads)
+    [string[]]$Raizes = @(),  # so para testes: onde procurar (padrao: C:\, Areas de Trabalho, Documentos, Downloads)
+    [string]$PastaComum = ''  # so para testes: pasta "Inicializar" de todos os usuarios
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -91,11 +97,13 @@ if ($Modo -eq 'Desfazer') {
 # ---- 1) atalhos nas pastas Inicializar (do usuario e de todos os usuarios) ----
 $AtalhosAntigos = @()
 $shell = New-Object -ComObject WScript.Shell
+$AtalhosComuns = @()   # atalhos antigos na pasta de TODOS os usuarios (so saem com administrador)
 $pastaUsuario = [Environment]::GetFolderPath('Startup')     # existe no .NET 2.0
-$pastaComum = $null                                         # 'CommonStartup' so existe no .NET 4
-try { $pastaComum = [string]$shell.SpecialFolders.Item('AllUsersStartup') } catch { }
-if (-not $pastaComum -and $env:ProgramData) { $pastaComum = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup' }
-foreach ($pastaInicio in @($pastaUsuario, $pastaComum)) {
+if (-not $PastaComum) {                                     # 'CommonStartup' so existe no .NET 4
+    try { $PastaComum = [string]$shell.SpecialFolders.Item('AllUsersStartup') } catch { }
+    if (-not $PastaComum -and $env:ProgramData) { $PastaComum = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup' }
+}
+foreach ($pastaInicio in @($pastaUsuario, $PastaComum)) {
     if (-not $pastaInicio) { continue }
     foreach ($lnk in @(Get-ChildItem -LiteralPath $pastaInicio -Filter '*.lnk' -Force)) {
         if ($lnk.Extension -ne '.lnk') { continue }   # -Filter tambem pega nomes curtos 8.3 (ex.: x.lnkbak)
@@ -119,10 +127,32 @@ foreach ($pastaInicio in @($pastaUsuario, $pastaComum)) {
             if ($pastaInicio -eq $pastaUsuario) {
                 $AtalhosAntigos += $lnk.FullName
             } else {
-                $Avisos += ('AVISO: atalho antigo em Inicializar (todos os usuarios) precisa de administrador para remover: ' + $lnk.FullName)
+                $AtalhosComuns += $lnk.FullName
             }
         }
     }
+}
+
+# ---- Modo Admin (elevado, depois do aceite do Windows): atalho antigo de TODOS os usuarios ----
+$ArqPendente = Join-Path $Novo 'pendente_admin.txt'
+if ($Modo -eq 'Admin') {
+    $destinoComum = Join-Path $PastaBackup 'todos_usuarios'
+    $null = New-Item -ItemType Directory -Path $destinoComum -Force
+    $sobrou = 0
+    foreach ($a in $AtalhosComuns) {
+        # copia e so depois apaga (nao move): a copia herda as permissoes da pasta do usuario
+        $copia = Join-Path $destinoComum (Split-Path $a -Leaf)
+        Copy-Item -LiteralPath $a -Destination $copia -Force
+        if (Test-Path -LiteralPath $copia) { Remove-Item -LiteralPath $a -Force }
+        if (Test-Path -LiteralPath $a) {
+            $sobrou = $sobrou + 1
+            Registrar ('ERRO ao desativar atalho antigo de todos os usuarios: ' + $a)
+        } else {
+            Registrar ('Atalho antigo de TODOS os usuarios desativado (copia em atalhos_antigos\todos_usuarios): ' + $a)
+        }
+    }
+    if ($sobrou -eq 0) { Remove-Item -LiteralPath $ArqPendente -Force }
+    return
 }
 
 # ---- 2) entradas antigas em HKCU\...\Run ----
@@ -247,6 +277,14 @@ if ($TemConfigNova) {
     }
 } else {
     Registrar 'Nenhuma instalacao antiga encontrada.'
+}
+
+if ($AtalhosComuns.Count -gt 0) {
+    # O instalador le este arquivo e pede o aceite de administrador so para este passo.
+    [System.IO.File]::WriteAllLines($ArqPendente, [string[]]$AtalhosComuns)
+    foreach ($a in $AtalhosComuns) { Registrar ('AVISO: atalho antigo em Inicializar de TODOS os usuarios (precisa de administrador para sair): ' + $a) }
+} elseif (Test-Path -LiteralPath $ArqPendente) {
+    Remove-Item -LiteralPath $ArqPendente -Force
 }
 
 if ($AtalhosAntigos.Count -gt 0) {

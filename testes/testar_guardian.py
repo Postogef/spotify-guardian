@@ -328,25 +328,74 @@ def t_404_duas_vezes_sobe_erro():
         assert e.http_status == 404
 
 
+# ------------------------------------------------------------ guardian antigo de outra pasta
+@teste
+def t_parar_guardians_antigos_le_a_contagem():
+    script = os.path.join(PASTA, "parar.ps1")
+    if os.path.exists(script):
+        os.remove(script)
+    assert g.parar_guardians_antigos() is None  # sem parar.ps1 (pasta antiga): nao faz nada
+
+    class R:
+        stdout = b"PARADOS=2\r\n"
+    chamadas = []
+    original = g.subprocess.run
+    open(script, "w").close()
+    try:
+        g.subprocess.run = lambda args, **k: chamadas.append(args) or R
+        assert g.parar_guardians_antigos() == 2
+        R.stdout = b""
+        assert g.parar_guardians_antigos() is None
+    finally:
+        g.subprocess.run = original
+        os.remove(script)
+    args = chamadas[0]
+    assert "-SoAntigos" in args and args[args.index("-Exceto") + 1] == str(os.getpid())
+    assert args[args.index("-Pasta") + 1] == g.PASTA
+
+
+@teste
+def t_vigia_anota_quando_fecha_antigo():
+    respostas = [1, RuntimeError("falhou"), 0]
+
+    def falso():
+        r = respostas.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    originais = (g.parar_guardians_antigos, g.ATRASOS_VIGIA_ANTIGOS)
+    g.parar_guardians_antigos, g.ATRASOS_VIGIA_ANTIGOS = falso, (0, 0, 0)
+    try:
+        g._vigiar_guardians_antigos()  # nao pode levantar erro
+    finally:
+        g.parar_guardians_antigos, g.ATRASOS_VIGIA_ANTIGOS = originais
+    assert respostas == []
+    with open(g.LOG_FILE, encoding="utf-8") as f:
+        texto = f.read()
+    assert texto.count("Fechei 1 Spotify Guardian antigo") == 1
+    assert "Nao consegui conferir se ha guardian antigo rodando" in texto
+
+
 # ------------------------------------------------------------ main (tratamento de erros)
 def rodar_main(erro, n=1):
     reset()
     relogio = RelogioFalso(parar_depois=n)
     g.time.sleep = relogio
     g.ATUALIZACAO_ATRASO = 10 ** 9
-    originais = (g.garantir_musica, g.conectar, g.ja_esta_rodando)
+    originais = (g.garantir_musica, g.conectar, g.ja_esta_rodando, g.iniciar_vigia_de_antigos)
 
     def falha(sp):
         raise erro
     g.garantir_musica = falha
     g.conectar = lambda: object()
     g.ja_esta_rodando = lambda: False
+    g.iniciar_vigia_de_antigos = lambda: None
     try:
         g.main()
     except Pare:
         pass
     finally:
-        g.garantir_musica, g.conectar, g.ja_esta_rodando = originais
+        g.garantir_musica, g.conectar, g.ja_esta_rodando, g.iniciar_vigia_de_antigos = originais
     return relogio.esperas
 
 

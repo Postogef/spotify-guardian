@@ -981,6 +981,48 @@ def refazer_login():
     input("\nEnter pra fechar...")
 
 
+ATRASOS_VIGIA_ANTIGOS = (0, 180, 900)  # s apos abrir: no login o antigo pode abrir depois do novo
+
+
+def parar_guardians_antigos():
+    # Fecha guardians ANTIGOS (de outra pasta: a versao copiada na mao, com
+    # iniciar.bat ou guardian.exe) que ainda abrem sozinhos no login, por exemplo
+    # por um atalho na inicializacao de todos os usuarios. Dois guardians juntos
+    # brigam pelo controle da musica. Nao precisa de administrador.
+    # Devolve quantos fechou (None se nao deu pra saber).
+    script = os.path.join(PASTA, "parar.ps1")
+    if not os.path.exists(script):
+        return None
+    r = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", script, "-Exceto", str(os.getpid()), "-Pasta", PASTA, "-SoAntigos"],
+        creationflags=CREATE_NO_WINDOW, timeout=150,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    achou = re.search(rb"PARADOS=(\d+)", r.stdout or b"")
+    return int(achou.group(1)) if achou else None
+
+
+def _vigiar_guardians_antigos():
+    espera = threading.Event()  # so para esperar, sem mexer no time.sleep do loop principal
+    anterior = 0
+    for atraso in ATRASOS_VIGIA_ANTIGOS:
+        espera.wait(max(0, atraso - anterior))
+        anterior = atraso
+        try:
+            fechados = parar_guardians_antigos()
+        except Exception as e:
+            log(f"Nao consegui conferir se ha guardian antigo rodando: {resumo_erro(e)}")
+            continue
+        if fechados:
+            log(f"Fechei {fechados} Spotify Guardian antigo(s) que rodava(m) de outra pasta. "
+                "Se isto aparecer a cada login, o antigo ainda esta na inicializacao do Windows: "
+                "rode o instalador de novo e aceite a permissao de administrador.")
+
+
+def iniciar_vigia_de_antigos():
+    threading.Thread(target=_vigiar_guardians_antigos, daemon=True).start()
+
+
 def main():
     sem_espera = "--sem-espera" in sys.argv
     if ja_esta_rodando():
@@ -999,6 +1041,7 @@ def main():
         log("Atualizacao automatica desligada (sem repositorio configurado).")
     elif not ATUALIZACAO_AUTO:
         log("Atualizacao automatica desligada no config.json.")
+    iniciar_vigia_de_antigos()
     if STARTUP_DELAY and not sem_espera:
         log(f"Aguardando {STARTUP_DELAY:g}s de inicializacao...")
         time.sleep(STARTUP_DELAY)

@@ -22,7 +22,14 @@ nada antes.
      `iniciar.bat`/`guardian.exe`), desativando o atalho antigo da inicialização;
    - numa máquina sem instalação anterior, pede **Client ID, Client Secret e a
      playlist** do posto (painel do Spotify for Developers);
-   - coloca o guardian na inicialização do Windows e já deixa rodando.
+   - coloca o guardian na inicialização do Windows e já deixa rodando;
+   - só para o guardian antigo depois que o novo abriu. Se o novo não abrir, o
+     antigo continua funcionando e o instalador avisa.
+
+   O instalador **não** roda como administrador. A única exceção: se o guardian
+   antigo estiver na inicialização de **todos os usuários**, o Windows pede a
+   permissão de administrador só para tirar esse atalho. Se ninguém aceitar,
+   nada quebra: o guardian novo fecha o antigo sozinho a cada login.
 4. **Primeiro uso:** se ainda não houver login, o navegador abre. Entre com a
    conta Spotify **daquele posto** e autorize. O login fica salvo.
 
