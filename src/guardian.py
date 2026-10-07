@@ -17,6 +17,8 @@ Instalado pelo SpotifyGuardian-Setup.exe, que ja traz o Python junto
 Uso:
   guardian.py                 roda o guardian (e o que a inicializacao do Windows chama)
   guardian.py --sem-espera    idem, sem o startup_delay
+  guardian.py --vigia         chamado pela tarefa agendada a cada 5 min: so abre o
+                              guardian se ele nao estiver rodando
   guardian.py --relogin       refaz o login do Spotify (apaga o .cache_gef)
   guardian.py --reiniciar     reinicia o guardian (ex.: depois de editar o config.json)
 """
@@ -38,11 +40,42 @@ import subprocess
 from ctypes import wintypes
 from datetime import datetime
 
+MUTEX_NOME = "Local\\SpotifyGuardianGEF"
+MUTEX_INSTALADOR = "SpotifyGuardianSetupGEF"  # SetupMutex do instalador (Inno Setup)
+# existe enquanto a janela "Refazer login" / "Reiniciar" trabalha: ela fecha o guardian de proposito
+MUTEX_AJUDANTE = "Local\\SpotifyGuardianGEFAjudante"
+
+
+def _mutex_existe(nome):
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenMutexW.restype = wintypes.HANDLE
+        k32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        h = k32.OpenMutexW(0x00100000, False, nome)  # SYNCHRONIZE
+        if h:
+            k32.CloseHandle(h)
+            return True
+        return ctypes.get_last_error() == 5  # existe, mas e de um processo de administrador
+    except Exception:
+        pass
+    return False
+
+
+# A tarefa agendada chama "guardian.py --vigia" a cada 5 minutos. Se o guardian ja
+# esta rodando, se o instalador esta no meio de uma instalacao/atualizacao ou se a
+# janela "Refazer login"/"Reiniciar" esta trabalhando, sai aqui mesmo: antes de
+# carregar as bibliotecas pesadas e sem escrever no log.
+if __name__ == "__main__" and "--vigia" in sys.argv:
+    if (_mutex_existe(MUTEX_NOME) or _mutex_existe(MUTEX_INSTALADOR)
+            or _mutex_existe(MUTEX_AJUDANTE)):
+        sys.exit(0)
+
 import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth, SpotifyOauthError
 
-VERSAO = "2.0.1"
+VERSAO = "2.0.2"
 # "dono/repositorio" no GitHub de onde vem as atualizacoes. O build.ps1 preenche.
 REPO_ATUALIZACAO = ""
 
@@ -162,8 +195,22 @@ try:
                           (f"https://api.github.com/repos/{REPO_ATUALIZACAO}/releases/latest"
                            if REPO_ATUALIZACAO else ""))
     ATUALIZACAO_ATRASO = int(CFG.get("atualizacao_atraso_s", 600))  # 1a checagem apos iniciar
+    # Tarefa agendada do Windows que reabre o guardian se ele for fechado.
+    REABRIR_SOZINHO    = CFG.get("reabrir_sozinho", True)
 except Exception as e:
-    log(f"ERRO no config.json: {type(e).__name__}: {e}")
+    _erro_cfg = f"ERRO no config.json: {type(e).__name__}: {e}"
+    if __name__ == "__main__" and "--vigia" in sys.argv:
+        # a tarefa agendada tenta de novo a cada 5 minutos: anota o erro uma vez so
+        try:
+            with open(LOG_FILE, "rb") as _f:
+                _f.seek(max(0, os.path.getsize(LOG_FILE) - 600))
+                _ja_anotou = _erro_cfg.encode("utf-8") in _f.read()
+        except OSError:
+            _ja_anotou = False
+        if not _ja_anotou:
+            log(_erro_cfg)
+        sys.exit(0)
+    log(_erro_cfg)
     if __name__ == "__main__" and ("--relogin" in sys.argv or "--reiniciar" in sys.argv):
         # atalhos do menu Iniciar abrem janela preta: mostra o erro antes de ela fechar
         print(f"\nERRO no config.json: {type(e).__name__}: {e}")
@@ -192,10 +239,13 @@ ESTADO_ATUALIZACAO = os.path.join(PASTA, "atualizacao_estado.json")
 MAX_TENTATIVAS_ATUALIZACAO = 2   # o mesmo instalador roda no maximo 2x (1 por dia)
 PRAZO_DOWNLOAD = 15 * 60         # desiste do download depois de 15 min
 PRAZO_LOGIN = 10 * 60            # espera o login no navegador por ate 10 min
-MUTEX_NOME = "Local\\SpotifyGuardianGEF"
-MUTEX_INSTALADOR = "SpotifyGuardianSetupGEF"  # SetupMutex do instalador (Inno Setup)
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+SCHTASKS = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
+# uma tarefa por usuario do Windows (o nome da tarefa vale para o PC inteiro)
+NOME_TAREFA = "Spotify Guardian GEF (" + os.environ.get("USERNAME", "usuario") + ")"
+INTERVALO_VIGIA_MIN = 5
+ARQ_TAREFA = os.path.join(PASTA, "tarefa_vigia.txt")  # marca da tarefa ja criada
 POWERSHELL = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                           "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 
@@ -774,22 +824,6 @@ def verificar_atualizacao():
     )
 
 
-def _mutex_existe(nome):
-    try:
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.OpenMutexW.restype = wintypes.HANDLE
-        k32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-        k32.CloseHandle.argtypes = [wintypes.HANDLE]
-        h = k32.OpenMutexW(0x00100000, False, nome)  # SYNCHRONIZE
-        if h:
-            k32.CloseHandle(h)
-            return True
-        return ctypes.get_last_error() == 5  # existe, mas e de um processo de administrador
-    except Exception:
-        pass
-    return False
-
-
 def guardian_rodando():
     # Existe um guardian aberto neste usuario? (o mutex dele existe)
     return _mutex_existe(MUTEX_NOME)
@@ -895,19 +929,55 @@ def _ignorar_ctrl_c():
         pass
 
 
+_MUTEX_AJUDANTE = None
+
+
+def _segurar_tarefa_vigia():
+    # Enquanto esta janela trabalha (guardian fechado de proposito), a tarefa
+    # agendada (--vigia) nao abre outro guardian no meio. Se a janela for fechada
+    # ou morta, o mutex some sozinho.
+    global _MUTEX_AJUDANTE
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        _MUTEX_AJUDANTE = k32.CreateMutexW(None, False, MUTEX_AJUDANTE)
+    except Exception:
+        _MUTEX_AJUDANTE = None
+
+
+def _soltar_tarefa_vigia():
+    # Solta ANTES do "Enter pra fechar": uma janela esquecida aberta nao pode
+    # desligar a tarefa agendada.
+    global _MUTEX_AJUDANTE
+    h, _MUTEX_AJUDANTE = _MUTEX_AJUDANTE, None
+    if h:
+        try:
+            k32 = ctypes.WinDLL("kernel32")
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            k32.CloseHandle(h)
+        except Exception:
+            pass
+
+
 def reiniciar():
     _ignorar_ctrl_c()
     desligar_quickedit()  # um clique na janela nao pode congelar no meio
     print("Reiniciando o Spotify Guardian...")
     reabrir = _reabridor()
     _ao_fechar_janela(reabrir)  # se fecharem a janela no X, o guardian volta mesmo assim
-    parou = False
+    _segurar_tarefa_vigia()
+    parou = subiu = False
     try:
-        parou = parar_outros_guardians()
+        try:
+            parou = parar_outros_guardians()
+        finally:
+            reabrir()  # qualquer erro no meio tambem reabre
+        print("Aguardando o guardian novo abrir...")
+        subiu = parou and _esperar_guardian_subir()
     finally:
-        reabrir()  # qualquer erro no meio tambem reabre
-    print("Aguardando o guardian novo abrir...")
-    if parou and _esperar_guardian_subir():
+        _soltar_tarefa_vigia()
+    if subiu:
         print("Pronto. O guardian esta rodando de novo (sem janela).")
         time.sleep(3)
     else:
@@ -951,6 +1021,7 @@ def refazer_login():
     novo = CACHE + ".novo"
     reabrir_guardian = _reabridor()
     _ao_fechar_janela(reabrir_guardian)  # se fecharem a janela no X, o guardian volta
+    _segurar_tarefa_vigia()  # a tarefa agendada nao pode reabrir o guardian no meio do login
     try:
         print("Parando o guardian que esta rodando...")
         parar_outros_guardians()  # libera a porta 8888 do login
@@ -977,7 +1048,20 @@ def refazer_login():
             pass
     finally:
         print("Iniciando o guardian de novo...")
-        reabrir_guardian()
+        try:
+            if guardian_rodando():
+                # abriu um no meio do login (ainda com o login antigo): troca por um novo
+                parar_outros_guardians()
+        except Exception:
+            pass
+        finally:
+            try:
+                reabrir_guardian()
+                # a tarefa agendada so volta a valer com o guardian novo ja no ar: senao
+                # um "--vigia" que caisse bem nesse intervalo abriria outro guardian
+                _esperar_guardian_subir()
+            finally:
+                _soltar_tarefa_vigia()
     input("\nEnter pra fechar...")
 
 
@@ -1002,7 +1086,139 @@ def parar_guardians_antigos():
     return int(achou.group(1)) if achou else None
 
 
+def xml_tarefa_vigia():
+    # Tarefa do Agendador do Windows, so deste usuario e sem administrador: a cada
+    # 5 minutos chama "guardian.py --vigia", que so faz algo se o guardian nao
+    # estiver rodando. E o que faz o guardian voltar sozinho se for fechado.
+    from xml.sax.saxutils import escape
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    usuario = os.environ.get("USERNAME", "")
+    if os.environ.get("USERDOMAIN"):
+        usuario = os.environ["USERDOMAIN"] + "\\" + usuario
+    script = os.path.join(PASTA, "guardian.py")
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Reabre o Spotify Guardian GEF se ele for fechado (confere a cada {INTERVALO_VIGIA_MIN} minutos).</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT{INTERVALO_VIGIA_MIN}M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2000-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{escape(usuario)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(pythonw)}</Command>
+      <Arguments>{escape('"' + script + '" --vigia')}</Arguments>
+      <WorkingDirectory>{escape(PASTA)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _schtasks(*args):
+    return subprocess.run([SCHTASKS] + list(args), creationflags=CREATE_NO_WINDOW, timeout=60,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def registrar_tarefa_vigia():
+    # Cria (ou conserta) a tarefa agendada. So na instalacao feita pelo instalador
+    # (pythonw.exe embutido + parar.ps1). Devolve "criada", "ok", "removida" ou None.
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if (getattr(sys, "frozen", False) or not os.path.exists(pythonw)
+            or not os.path.exists(os.path.join(PASTA, "parar.ps1"))):
+        return None
+    from xml.sax.saxutils import escape
+    consulta = _schtasks("/Query", "/TN", NOME_TAREFA, "/XML")
+    existe = consulta.returncode == 0
+    registrada = (consulta.stdout or b"").decode("oem", errors="replace").lower()
+    if not REABRIR_SOZINHO:
+        if not existe:
+            return None
+        r = _schtasks("/Delete", "/TN", NOME_TAREFA, "/F")
+        if r.returncode != 0:
+            saida = " ".join((r.stdout or b"").decode("oem", errors="replace").split())
+            log(f"Nao consegui remover a tarefa agendada ({saida}).")
+            return None
+        log("Tarefa agendada removida (reabrir_sozinho desligado no config.json).")
+        return "removida"
+    # alguem pode ter desativado ou mexido na tarefa pelo Agendador: ai refaz.
+    # Confere o caminho do guardian.py inteiro: so a pasta casaria tambem com uma
+    # pasta vizinha de nome parecido ("SpotifyGuardian" x "SpotifyGuardian Copia").
+    script = os.path.join(PASTA, "guardian.py")
+    inteira = ("<enabled>false</enabled>" not in registrada and "--vigia" in registrada
+               and (not PASTA.isascii() or escape(script).lower() in registrada))
+    xml = xml_tarefa_vigia()
+    marca = hashlib.sha256(xml.encode("utf-8")).hexdigest()
+    try:
+        with open(ARQ_TAREFA, encoding="utf-8") as f:
+            anterior = f.read().strip()
+    except OSError:
+        anterior = ""
+    if existe and inteira and anterior == marca:
+        return "ok"
+    arq = os.path.join(tempfile.gettempdir(), "spotify_guardian_tarefa.xml")
+    with open(arq, "w", encoding="utf-16") as f:
+        f.write(xml)
+    try:
+        r = _schtasks("/Create", "/TN", NOME_TAREFA, "/XML", arq, "/F")
+    finally:
+        try:
+            os.remove(arq)
+        except OSError:
+            pass
+    if r.returncode != 0:
+        saida = " ".join((r.stdout or b"").decode("oem", errors="replace").split())
+        log(f"Nao consegui criar a tarefa agendada que reabre o guardian ({saida}). "
+            "O guardian continua funcionando normalmente.")
+        return None
+    try:
+        with open(ARQ_TAREFA, "w", encoding="utf-8") as f:
+            f.write(marca)
+    except OSError:
+        pass
+    log(f"Tarefa agendada criada: se o guardian for fechado, o Windows reabre em ate "
+        f"{INTERVALO_VIGIA_MIN} minutos.")
+    return "criada"
+
+
 def _vigiar_guardians_antigos():
+    try:
+        registrar_tarefa_vigia()
+    except Exception as e:
+        log(f"Nao consegui conferir a tarefa agendada: {resumo_erro(e)}")
     espera = threading.Event()  # so para esperar, sem mexer no time.sleep do loop principal
     anterior = 0
     for atraso in ATRASOS_VIGIA_ANTIGOS:
@@ -1023,14 +1239,82 @@ def iniciar_vigia_de_antigos():
     threading.Thread(target=_vigiar_guardians_antigos, daemon=True).start()
 
 
+class _WTSINFOW(ctypes.Structure):
+    _fields_ = [("State", ctypes.c_int), ("SessionId", wintypes.DWORD),
+                ("IncomingBytes", wintypes.DWORD), ("OutgoingBytes", wintypes.DWORD),
+                ("IncomingFrames", wintypes.DWORD), ("OutgoingFrames", wintypes.DWORD),
+                ("IncomingCompressedBytes", wintypes.DWORD),
+                ("OutgoingCompressedBytes", wintypes.DWORD),
+                ("WinStationName", ctypes.c_wchar * 32), ("Domain", ctypes.c_wchar * 17),
+                ("UserName", ctypes.c_wchar * 21),
+                ("ConnectTime", ctypes.c_longlong), ("DisconnectTime", ctypes.c_longlong),
+                ("LastInputTime", ctypes.c_longlong), ("LogonTime", ctypes.c_longlong),
+                ("CurrentTime", ctypes.c_longlong)]
+
+
+def _minutos_de_sessao():
+    # ha quantos minutos este usuario entrou no Windows; 0 se nao der pra saber
+    try:
+        wts = ctypes.WinDLL("wtsapi32")
+        wts.WTSQuerySessionInformationW.restype = wintypes.BOOL
+        wts.WTSQuerySessionInformationW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+        wts.WTSFreeMemory.restype = None
+        wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        buf = ctypes.c_void_p()
+        tam = wintypes.DWORD(0)
+        # este PC (None), sessao atual (0xFFFFFFFF), WTSSessionInfo (24)
+        if not wts.WTSQuerySessionInformationW(None, 0xFFFFFFFF, 24,
+                                               ctypes.byref(buf), ctypes.byref(tam)):
+            return 0.0
+        try:
+            if not buf.value or tam.value < ctypes.sizeof(_WTSINFOW):
+                return 0.0
+            info = _WTSINFOW.from_address(buf.value)
+            entrou, agora = info.LogonTime, info.CurrentTime
+        finally:
+            wts.WTSFreeMemory(buf)
+        if entrou <= 0 or agora < entrou:
+            return 0.0
+        return (agora - entrou) / 600000000.0  # unidades de 100 ns -> minutos
+    except Exception:
+        return 0.0
+
+
+def _minutos_ligado():
+    # Ha quantos minutos o PC foi ligado E o usuario entrou (o menor dos dois).
+    # So o tempo ligado do Windows (GetTickCount64) nao serve: com a "Inicializacao
+    # rapida" do Windows 10 ele nao zera ao desligar e ligar, so ao reiniciar.
+    # Se nao der pra saber, devolve 0 (= recem-ligado: espera o startup_delay).
+    try:
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetTickCount64.restype = ctypes.c_ulonglong
+        return min(k32.GetTickCount64() / 60000.0, _minutos_de_sessao())
+    except Exception:
+        return 0.0
+
+
 def main():
-    sem_espera = "--sem-espera" in sys.argv
+    pela_tarefa = "--vigia" in sys.argv  # so chega aqui se o guardian NAO estava rodando
+    if pela_tarefa and not REABRIR_SOZINHO:
+        # desligaram o reabrir_sozinho no config.json e fecharam o guardian sem usar o
+        # "Reiniciar": a tarefa que sobrou nao reabre nada, so se remove
+        try:
+            registrar_tarefa_vigia()
+        except Exception as e:
+            log(f"Nao consegui conferir a tarefa agendada: {resumo_erro(e)}")
+        return
+    # PC recem-ligado: a tarefa pode disparar antes do atalho da inicializacao; ai
+    # espera o startup_delay normal. Com o PC ligado ha mais tempo, abre direto.
+    sem_espera = "--sem-espera" in sys.argv or (pela_tarefa and _minutos_ligado() > 5)
     if ja_esta_rodando():
         log("Ja existe um Spotify Guardian rodando neste usuario. Saindo.")
         return
     desligar_quickedit()
     log("=" * 50)
-    log(f"Spotify Guardian GEF {VERSAO} iniciado.")
+    log(f"Spotify Guardian GEF {VERSAO} iniciado"
+        + (" (aberto pela tarefa agendada: nao havia guardian rodando)." if pela_tarefa else "."))
     log(f"Python {sys.version.split()[0]}{' (exe)' if getattr(sys, 'frozen', False) else ''} | "
         f"spotipy {versao('spotipy')} | requests {versao('requests')} | urllib3 {versao('urllib3')}")
     if PLAYLIST_URI != PLAYLIST_CFG:

@@ -56,6 +56,11 @@ function Somar([string]$d, [int]$p) {
 # Caminho do guardian dentro de um texto de comando (com ou sem aspas).
 function Caminho-NoComando([string]$texto) {
     if ($texto -match '"([^"]*(guardian\.py|guardian\.exe|iniciar\.bat))"') { return $matches[1] }
+    # sem aspas e com espaco no caminho (ex.: C:\SpotifyGuardian Gef 1\iniciar.bat): so vale se existir
+    if ($texto -match '([A-Za-z]:\\[^"]*?(guardian\.py|guardian\.exe|iniciar\.bat))') {
+        $achado = $matches[1]
+        if (Test-Path -LiteralPath $achado) { return $achado }
+    }
     if ($texto -match '(\S*(guardian\.py|guardian\.exe|iniciar\.bat))') { return $matches[1] }
     return $null
 }

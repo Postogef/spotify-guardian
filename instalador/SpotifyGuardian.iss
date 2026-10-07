@@ -56,15 +56,19 @@ Name: "ptbr"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\__pycache__"
+; resto de uma instalacao interrompida
+Type: filesandordirs; Name: "{app}\python.novo"
 
 [Files]
 ; primeiro: copias usadas pelo proprio instalador antes de instalar (abrem rapido,
 ; sem precisar descompactar os 2 Pythons antes)
 Source: "parar.ps1"; Flags: dontcopy
 Source: "migrar.ps1"; Flags: dontcopy
-; o Python vai para uma pasta nova (o antigo foi guardado de lado no PrepareToInstall)
-Source: "{#Build}\python38\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion; Check: UsarPython38
-Source: "{#Build}\python314\*"; DestDir: "{app}\python"; Flags: recursesubdirs createallsubdirs ignoreversion; Check: not UsarPython38
+; O Python novo e copiado para "python.novo" e so no fim troca de lugar com o "python"
+; (TrocarPython). Assim a pasta "python" nunca fica pela metade: a tarefa agendada, que
+; chama o pythonw.exe a cada 5 minutos, encontra sempre um Python inteiro ou nenhum.
+Source: "{#Build}\python38\*"; DestDir: "{app}\python.novo"; Flags: recursesubdirs createallsubdirs ignoreversion; Check: UsarPython38
+Source: "{#Build}\python314\*"; DestDir: "{app}\python.novo"; Flags: recursesubdirs createallsubdirs ignoreversion; Check: not UsarPython38
 Source: "parar.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "migrar.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Build}\app\diagnostico.py"; DestDir: "{app}"; Flags: ignoreversion
@@ -92,6 +96,7 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 ; config.json, .cache_gef (login) e os logs ficam, para uma reinstalacao
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\python.anterior*"
+Type: filesandordirs; Name: "{app}\python.novo"
 Type: files; Name: "{app}\*.anterior"
 Type: filesandordirs; Name: "{app}\__pycache__"
 
@@ -107,6 +112,7 @@ var
   VoltouVersao: Boolean;       { o guardian novo nao abriu e a versao anterior voltou }
   VersaoAnterior: String;      { versao instalada antes (registro), para desfazer }
   GuardianIniciado: Boolean;
+  TinhaPython: Boolean;        { ja havia uma versao instalada nesta pasta (atualizacao) }
   NaoAbriu: Boolean;           { 1a instalacao: o guardian novo nao abriu; o antigo foi mantido }
 
 const
@@ -335,6 +341,20 @@ begin
   end;
 end;
 
+{ Tarefa agendada que o guardian cria para se reabrir sozinho (uma por usuario). }
+procedure RemoverTarefaVigia;
+var
+  Codigo: Integer;
+begin
+  Exec(ExpandConstant('{sys}\schtasks.exe'),
+       '/Delete /TN "Spotify Guardian GEF (' + ExpandConstant('{username}') + ')" /F',
+       '', SW_HIDE, ewWaitUntilTerminated, Codigo);
+  if Codigo = 0 then
+    Log('Tarefa agendada removida.')
+  else
+    Log(Format('Tarefa agendada nao removida (nao existia ou falhou: schtasks -> %d).', [Codigo]));
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   I: Integer;
@@ -360,23 +380,62 @@ begin
     Exit;
   end;
   GuardianParado := True;
+  { Enquanto os arquivos sao trocados, a tarefa agendada nao pode abrir um
+    pythonw.exe desta pasta (--vigia, a cada 5 minutos): ele nasceria no meio da
+    troca do Python. O guardian recria a tarefa assim que abre (o novo, ou o
+    anterior se a instalacao for desfeita). }
+  RemoverTarefaVigia;
+  TinhaPython := DirExists(PastaApp + '\python');
   CopiasAnteriores(0);
-  { Guarda o Python atual de lado em vez de apagar: da para renomear a pasta mesmo
-    com algo rodando dela (ex.: janela do Diagnostico). Se a instalacao falhar,
-    o DeinitializeSetup devolve ele e reabre o guardian. }
+  { O Python atual fica onde esta ate o novo estar inteiro em "python.novo"
+    (ver TrocarPython): queda de energia ou erro no meio da copia nao estraga nada. }
+end;
+
+{ Troca o Python: o atual vai para "python.anterior-<data>" (da para renomear a pasta
+  mesmo com algo rodando dela, ex.: janela do Diagnostico) e o "python.novo" vira
+  "python". Sao so dois renomeios: a pasta "python" nunca fica pela metade. Se a
+  instalacao nao der certo depois, o DeinitializeSetup devolve o anterior.
+
+  Cada renomeio insiste por ate 10 s: ele falha (acesso negado) enquanto algum arquivo
+  da pasta esta sendo aberto, nem que seja por um instante (um python abrindo, o
+  antivirus conferindo os arquivos recem-copiados). Por isso tambem a tarefa
+  agendada e removida no PrepareToInstall: ela abriria um pythonw.exe daqui. }
+function RenomearPasta(const De, Para: String): Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to 20 do
+  begin
+    if RenameFile(De, Para) then
+    begin
+      if I > 1 then
+        Log(Format('Pasta %s estava em uso: so foi renomeada na tentativa %d.', [ExtractFileName(De), I]));
+      Exit;
+    end;
+    if I < 20 then
+      Sleep(500);
+  end;
+  Result := False;
+end;
+
+function TrocarPython: Boolean;
+begin
+  Result := False;
   if DirExists(PastaApp + '\python') then
   begin
     PythonGuardado := PastaApp + '\python.anterior-' + GetDateTimeString('yyyymmddhhnnss', #0, #0);
-    if RenameFile(PastaApp + '\python', PythonGuardado) then
-      Log('Python anterior guardado em ' + PythonGuardado)
-    else
+    if not RenomearPasta(PastaApp + '\python', PythonGuardado) then
     begin
       Log('ERRO ao guardar o Python anterior.');
       PythonGuardado := '';
-      Result := 'Nao foi possivel substituir o Python do Spotify Guardian (arquivos em uso). ' +
-                'Feche as janelas do Spotify Guardian (ex.: Diagnostico) e tente de novo.';
+      Exit;
     end;
+    Log('Python anterior guardado em ' + PythonGuardado);
   end;
+  Result := RenomearPasta(PastaApp + '\python.novo', PastaApp + '\python');
+  if not Result then
+    Log('ERRO ao ativar o Python novo (python.novo -> python).');
 end;
 
 function MontarConfig: String;
@@ -400,6 +459,9 @@ end;
 
 { O guardian cria o mutex logo no inicio: se ele nao aparece, o guardian novo
   morreu ao abrir (biblioteca/DLL incompativel com este Windows, etc.). }
+const
+  EsperaGuardian = 360;   { segundos para o guardian novo abrir (PC fraco demora) }
+
 function GuardianSubiu(Segundos: Integer): Boolean;
 var
   I: Integer;
@@ -464,13 +526,42 @@ begin
     Log('Guardian antigo de todos os usuarios desativado.');
 end;
 
+{ Ha atalhos / entradas Run do guardian antigo guardados em atalhos_antigos? }
+function TemAtalhosGuardados: Boolean;
+var
+  R: TFindRec;
+begin
+  Result := FileExists(PastaApp + '\atalhos_antigos\run_antigos.txt');
+  if not Result and FindFirst(PastaApp + '\atalhos_antigos\*.lnk', R) then
+  begin
+    Result := True;
+    FindClose(R);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Config: String;
+  JaTinhaAtalhos: Boolean;
 begin
   if CurStep = ssPostInstall then
   begin
+    if not TrocarPython then
+    begin
+      if TinhaPython then
+      begin
+        VoltouVersao := True;
+        Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
+      end;
+      { 1a instalacao: nada foi migrado ainda; um guardian antigo continua como estava }
+      NaoAbriu := True;
+      ConfirmarInstalacao;
+      SuppressibleMsgBox('Nao foi possivel preparar o Python do Spotify Guardian (arquivos em uso).' + #13#10 +
+        'Reinicie o computador e rode o instalador de novo.', mbError, MB_OK, IDOK);
+      Exit;
+    end;
     Config := PastaApp + '\config.json';
+    JaTinhaAtalhos := TemAtalhosGuardados;
     RodarPS(PastaApp + '\migrar.ps1',
             ParamsMigrar(PastaApp, 'Migrar') + ' -Estado "' + ArquivoEstado + '"');
     if not FileExists(Config) and (PaginaCred <> nil) and EhHex32(Trim(PaginaCred.Values[0])) then
@@ -489,17 +580,22 @@ begin
     IniciarGuardian;
     { So descarta o que funcionava (versao anterior ou guardian antigo de outra
       pasta) depois que o novo abriu mesmo. Senao a loja ficaria sem guardian. }
-    if DeveIniciar and not GuardianSubiu(240) then
+    if DeveIniciar and not GuardianSubiu(EsperaGuardian) then
     begin
       RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoPasta');
-      if PythonGuardado <> '' then
+      if TinhaPython then
       begin
-        Log('O guardian novo nao abriu em 240 s: voltando para a versao anterior.');
+        Log('O guardian novo nao abriu a tempo: voltando para a versao anterior.');
+        { a "versao anterior" pode ser uma 1a instalacao que nunca abriu (instalador
+          rodado de novo): se foi ESTA instalacao que tirou o guardian antigo da
+          inicializacao, religa os atalhos dele }
+        if not JaTinhaAtalhos and TemAtalhosGuardados then
+          RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
         VoltouVersao := True;
         Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
       end;
       { 1a instalacao: o guardian antigo nem foi parado; religa os atalhos dele }
-      Log('O guardian novo nao abriu em 240 s: mantendo o guardian antigo.');
+      Log('O guardian novo nao abriu a tempo: mantendo o guardian antigo.');
       RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
       NaoAbriu := True;
       GuardianIniciado := False;
@@ -516,26 +612,51 @@ begin
   end;
 end;
 
+{ Desinstalacao: a tarefa sai ANTES de o guardian ser fechado, senao ela reabriria ele. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoverTarefaVigia;
+end;
+
 procedure DeinitializeSetup;
+var
+  Descartado: String;
 begin
   { A instalacao parou no meio depois de fechar o guardian: devolve o Python
     antigo e reabre o guardian, para a loja nao ficar sem ele. }
   if GuardianParado and not InstalouOk then
   begin
     Log('Instalacao nao terminou: restaurando o guardian anterior.');
+    if DirExists(PastaApp + '\python.novo') then
+      DelTree(PastaApp + '\python.novo', True, True, True);
     if PythonGuardado <> '' then
     begin
-      { o Python novo (inteiro ou pela metade) sai do caminho; se algo ainda
-        prende arquivos dele, e so renomeado (e apagado numa proxima instalacao) }
+      { o Python novo sai do caminho com um RENOMEIO e so e apagado depois que o
+        anterior voltou: apagar primeiro podia deixar a pasta "python" pela metade
+        (arquivo em uso) e ai o anterior nao tinha como voltar para o lugar }
+      Descartado := '';
       if DirExists(PastaApp + '\python') then
-        if not DelTree(PastaApp + '\python', True, True, True) then
-          RenameFile(PastaApp + '\python',
-                     PastaApp + '\python.anterior-falhou-' + GetDateTimeString('yyyymmddhhnnss', #0, #0));
-      if not RenameFile(PythonGuardado, PastaApp + '\python') then
-        Log('ERRO ao restaurar o Python anterior de ' + PythonGuardado);
+      begin
+        Descartado := PastaApp + '\python.anterior-falhou-' + GetDateTimeString('yyyymmddhhnnss', #0, #0);
+        if not RenomearPasta(PastaApp + '\python', Descartado) then
+        begin
+          Log('ERRO ao tirar o Python novo do caminho; o anterior continua em ' + PythonGuardado);
+          Descartado := '';
+        end;
+      end;
+      if not DirExists(PastaApp + '\python') then
+        if not RenomearPasta(PythonGuardado, PastaApp + '\python') then
+          Log('ERRO ao restaurar o Python anterior de ' + PythonGuardado);
+      if Descartado <> '' then
+        if not DelTree(Descartado, True, True, True) then
+          Log('Python descartado ainda em uso, fica para a proxima instalacao apagar.');
     end;
     CopiasAnteriores(1);
     { o Windows ainda mostraria a versao nova em "Aplicativos instalados" }
+    { a versao que voltou pode nao conhecer a tarefa agendada: tira (a nova recria sozinha) }
+    if VoltouVersao then
+      RemoverTarefaVigia;
     if VoltouVersao and (VersaoAnterior <> '') then
     begin
       RegWriteStringValue(HKCU, ChaveDesinstalar, 'DisplayVersion', VersaoAnterior);
@@ -558,7 +679,18 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   if (PaginaCred <> nil) and (CurPageID = PaginaCred.ID) then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall);
-  if (CurPageID = wpFinished) and GuardianIniciado and not FileExists(ExpandConstant('{app}\.cache_gef')) then
+  if (CurPageID = wpFinished) and VoltouVersao then
+  begin
+    { atualizacao feita na mao que nao deu certo: a tela final nao pode dizer "concluido" }
+    WizardForm.FinishedHeadingLabel.Caption := 'A atualizacao NAO foi aplicada';
+    WizardForm.FinishedLabel.Caption :=
+      'Nao foi possivel atualizar o Spotify Guardian neste computador ' +
+      '(arquivos em uso, ou o guardian novo nao abriu).' + #13#10#13#10 +
+      'A versao anterior volta a funcionar quando esta janela for fechada.' + #13#10#13#10 +
+      'Reinicie o computador e rode o instalador de novo.';
+    WizardForm.AdjustLabelHeight(WizardForm.FinishedLabel);
+  end
+  else if (CurPageID = wpFinished) and GuardianIniciado and not FileExists(ExpandConstant('{app}\.cache_gef')) then
   begin
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
       'PRIMEIRO USO: o navegador vai abrir para o login do Spotify. ' +

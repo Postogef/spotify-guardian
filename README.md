@@ -33,6 +33,11 @@ nada antes.
 4. **Primeiro uso:** se ainda não houver login, o navegador abre. Entre com a
    conta Spotify **daquele posto** e autorize. O login fica salvo.
 
+O guardian roda sem janela (aparece como `pythonw.exe` no Gerenciador de Tarefas) e
+inicia junto com o Windows, quando o usuário entra. Ele também cria uma **tarefa
+agendada** só desse usuário (sem administrador) que confere a cada 5 minutos e
+reabre o guardian se ele tiver sido fechado.
+
 Depois disso não precisa fazer mais nada: o guardian confere **1 vez por dia**
 se existe versão nova no GitHub e se atualiza sozinho, sem perder a
 configuração nem o login.
@@ -59,6 +64,7 @@ configuração nem o login.
 | `dispositivo` | nome do PC | Nome do aparelho da loja no Spotify Connect, se for diferente do nome do computador |
 | `fechar_popup` | só no Win7 | Fecha o popup "versão desatualizada" do Spotify no Windows 7 |
 | `atualizacao_automatica` | `true` | `false` desliga a atualização automática nesta loja |
+| `reabrir_sozinho` | `true` | Tarefa agendada do Windows que reabre o guardian em até 5 minutos se ele for fechado. `false` remove a tarefa |
 
 ---
 
@@ -92,7 +98,10 @@ Regras de segurança da atualização:
 - Use **autenticação em dois fatores** na conta do GitHub: quem publica um
   release consegue instalar programas em todas as lojas.
 - Para desfazer uma versão ruim, publique uma versão **maior** com o código
-  anterior (ex.: `v2.0.2` com o conteúdo da `v2.0.0`).
+  anterior (ex.: `v2.0.4` com o conteúdo da `v2.0.3`). Não volte para um código
+  **anterior à 2.0.2**: ele não conhece a tarefa agendada, que ficaria para trás
+  nas lojas. Para desligar a tarefa em todas as lojas, publique uma versão com o
+  padrão de `reabrir_sozinho` em `false` (o guardian remove a tarefa ao abrir).
 
 ### Estrutura
 

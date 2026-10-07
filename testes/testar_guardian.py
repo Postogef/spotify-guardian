@@ -56,6 +56,7 @@ def perigo(nome):
 
 
 g.print = lambda *a, **k: None  # log() continua gravando no guardian.log de teste
+g._schtasks = perigo("_schtasks")  # nenhum teste pode mexer no Agendador de Tarefas de verdade
 g.fechar_popup = perigo("fechar_popup")
 g.abrir_spotify = perigo("abrir_spotify")
 g.spotify_aberto = lambda: True
@@ -179,6 +180,12 @@ def t_versao_tupla():
     assert g.versao_tupla("v2.0.10") > g.versao_tupla("2.0.9")
     assert g.versao_tupla("v2.0.0") == (2, 0, 0)
     assert g.versao_tupla("") == (0,)
+
+
+@teste
+def t_tarefa_dispara_mesmo_com_relogio_atrasado():
+    # PC com a pilha da placa fraca liga com data antiga: o gatilho nao pode comecar "no futuro"
+    assert "<StartBoundary>2000-01-01T00:00:00</StartBoundary>" in g.xml_tarefa_vigia()
 
 
 @teste
@@ -376,6 +383,161 @@ def t_vigia_anota_quando_fecha_antigo():
     assert "Nao consegui conferir se ha guardian antigo rodando" in texto
 
 
+# ------------------------------------------------------------ tarefa agendada (reabre sozinho)
+class _Saida:
+    def __init__(self, codigo, texto=b""):
+        self.returncode, self.stdout = codigo, texto
+
+
+def _com_schtasks_falso(respostas):
+    """Troca g._schtasks por um falso que devolve as respostas em ordem; devolve a lista de chamadas."""
+    chamadas = []
+
+    def falso(*args):
+        chamadas.append(args)
+        if args[0] == "/Create":  # confere o XML que seria registrado
+            with open(args[args.index("/XML") + 1], encoding="utf-16") as f:
+                chamadas.append(("XML", f.read()))
+        return respostas.pop(0)
+    g._schtasks = falso
+    return chamadas
+
+
+def _instalacao_falsa():
+    # registrar_tarefa_vigia so age na instalacao do instalador: pythonw.exe + parar.ps1
+    open(os.path.join(PASTA, "parar.ps1"), "w").close()
+    original = g.sys.executable
+    pasta_py = os.path.join(PASTA, "python")
+    os.makedirs(pasta_py, exist_ok=True)
+    open(os.path.join(pasta_py, "pythonw.exe"), "w").close()
+    g.sys.executable = os.path.join(pasta_py, "python.exe")
+    return original
+
+
+@teste
+def t_tarefa_vigia_cria_confere_e_remove():
+    originais = (g._schtasks, g.REABRIR_SOZINHO)
+    executavel = _instalacao_falsa()
+    if os.path.exists(g.ARQ_TAREFA):
+        os.remove(g.ARQ_TAREFA)
+    try:
+        # 1) nao existe -> cria
+        chamadas = _com_schtasks_falso([_Saida(1), _Saida(0)])
+        assert g.registrar_tarefa_vigia() == "criada"
+        assert chamadas[0][0] == "/Query" and chamadas[1][0] == "/Create" and "/F" in chamadas[1]
+        xml = chamadas[2][1]
+        assert "<Interval>PT5M</Interval>" in xml and "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+        assert "pythonw.exe</Command>" in xml and 'guardian.py" --vigia</Arguments>' in xml
+        assert "<LogonType>InteractiveToken</LogonType>" in xml and "LeastPrivilege" in xml
+        assert not os.path.exists(os.path.join(tempfile.gettempdir(), "spotify_guardian_tarefa.xml"))
+        # 2) existe, esta ligada, aponta para esta pasta e nao mudou -> nao mexe
+        from xml.sax.saxutils import escape
+        registrada = ('<Enabled>true</Enabled><Arguments>"%s\\guardian.py" --vigia</Arguments>'
+                      % escape(PASTA)).encode("oem", errors="replace")
+        chamadas = _com_schtasks_falso([_Saida(0, registrada)])
+        assert g.registrar_tarefa_vigia() == "ok" and len(chamadas) == 1
+        assert chamadas[0][-1] == "/XML"
+        # 2b) alguem desativou a tarefa no Agendador -> refaz
+        chamadas = _com_schtasks_falso([_Saida(0, registrada.replace(b">true<", b">false<")), _Saida(0)])
+        assert g.registrar_tarefa_vigia() == "criada" and chamadas[1][0] == "/Create"
+        if PASTA.isascii():  # com acento no caminho o guardian nao compara a pasta (a saida do schtasks vem em OEM)
+            # 2c) tarefa de outra pasta (instalacao movida) -> refaz
+            chamadas = _com_schtasks_falso([_Saida(0, b'<Arguments>"C:\\outra\\guardian.py" --vigia</Arguments>'), _Saida(0)])
+            assert g.registrar_tarefa_vigia() == "criada"
+            # 2d) tarefa de uma pasta vizinha de nome parecido -> refaz
+            vizinha = registrada.replace(b"\\guardian.py", b" Copia\\guardian.py")
+            chamadas = _com_schtasks_falso([_Saida(0, vizinha), _Saida(0)])
+            assert g.registrar_tarefa_vigia() == "criada" and chamadas[1][0] == "/Create"
+        # 3) foi apagada por fora -> recria
+        chamadas = _com_schtasks_falso([_Saida(1), _Saida(0)])
+        assert g.registrar_tarefa_vigia() == "criada"
+        # 4) Windows recusou -> so anota no log, sem erro
+        os.remove(g.ARQ_TAREFA)
+        chamadas = _com_schtasks_falso([_Saida(1), _Saida(1, b"ERRO: Acesso negado.")])
+        assert g.registrar_tarefa_vigia() is None
+        # 5) desligada no config -> remove
+        g.REABRIR_SOZINHO = False
+        chamadas = _com_schtasks_falso([_Saida(0), _Saida(0)])
+        assert g.registrar_tarefa_vigia() == "removida" and chamadas[1][0] == "/Delete"
+        chamadas = _com_schtasks_falso([_Saida(1)])
+        assert g.registrar_tarefa_vigia() is None and len(chamadas) == 1
+    finally:
+        g._schtasks, g.REABRIR_SOZINHO = originais
+        g.sys.executable = executavel
+        os.remove(os.path.join(PASTA, "parar.ps1"))
+    with open(g.LOG_FILE, encoding="utf-8") as f:
+        assert "Acesso negado" in f.read()
+
+
+@teste
+def t_tarefa_vigia_nao_age_fora_da_instalacao():
+    # rodando de uma pasta sem parar.ps1 (desenvolvimento / pasta antiga): nao cria tarefa
+    original = g._schtasks
+    chamadas = _com_schtasks_falso([])
+    try:
+        assert g.registrar_tarefa_vigia() is None and chamadas == []
+    finally:
+        g._schtasks = original
+
+
+@teste
+def t_xml_da_tarefa_escapa_caracteres():
+    originais = (g.PASTA, dict(os.environ))
+    g.PASTA = r"C:\Users\TELAO & GEF 1\AppData\Local\SpotifyGuardian"
+    os.environ["USERNAME"], os.environ["USERDOMAIN"] = "TELAO & GEF 1", "LOJA<1>"
+    try:
+        definicao = g.xml_tarefa_vigia()
+    finally:
+        g.PASTA = originais[0]
+        os.environ.clear()
+        os.environ.update(originais[1])
+    from xml.dom import minidom
+    doc = minidom.parseString(definicao.split("?>", 1)[1])  # XML valido mesmo com & e < no nome
+    texto = lambda tag: doc.getElementsByTagName(tag)[0].firstChild.data
+    assert texto("UserId") == "LOJA<1>\\TELAO & GEF 1"
+    assert texto("Arguments") == '"C:\\Users\\TELAO & GEF 1\\AppData\\Local\\SpotifyGuardian\\guardian.py" --vigia'
+    assert texto("WorkingDirectory") == r"C:\Users\TELAO & GEF 1\AppData\Local\SpotifyGuardian"
+
+
+@teste
+def t_vigia_sai_calado_se_o_guardian_ja_roda():
+    # o que a tarefa agendada faz a cada 5 min quando esta tudo bem: nada, e sem log
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = wintypes.HANDLE
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    with open(g.LOG_FILE, encoding="utf-8") as f:
+        antes = f.read()
+    # os nomes de verdade: sao os que o processo filho confere. Vale para o guardian
+    # rodando e para a janela "Refazer login"/"Reiniciar" trabalhando.
+    for nome in ("Local\\SpotifyGuardianGEF", g.MUTEX_AJUDANTE):
+        h = k32.CreateMutexW(None, False, nome)
+        try:
+            assert g._mutex_existe(nome)  # sem isso o filho viraria um guardian de verdade
+            r = subprocess.run([sys.executable, os.path.join(PASTA, "guardian.py"), "--vigia"],
+                               timeout=60, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert r.returncode == 0 and r.stdout == b"" and r.stderr == b"", (nome, r.returncode, r.stderr)
+        finally:
+            k32.CloseHandle(h)
+        assert not g._mutex_existe(nome) or nome == "Local\\SpotifyGuardianGEF"
+    with open(g.LOG_FILE, encoding="utf-8") as f:
+        assert f.read() == antes  # nenhuma linha nova no log
+
+
+@teste
+def t_janela_de_ajuda_segura_e_solta_a_tarefa():
+    assert not g._mutex_existe(g.MUTEX_AJUDANTE)
+    g._segurar_tarefa_vigia()
+    assert g._mutex_existe(g.MUTEX_AJUDANTE)
+    g._soltar_tarefa_vigia()
+    assert not g._mutex_existe(g.MUTEX_AJUDANTE)
+    g._soltar_tarefa_vigia()  # soltar duas vezes nao da erro
+
+
 # ------------------------------------------------------------ main (tratamento de erros)
 def rodar_main(erro, n=1):
     reset()
@@ -425,6 +587,57 @@ def t_main_login_expirado():
 @teste
 def t_main_login_pendente():
     assert rodar_main(SpotifyOauthError("Server listening on localhost has not been accessed")) == [1800]
+
+
+@teste
+def t_minutos_ligado_e_o_menor_entre_pc_e_sessao():
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32")
+    k32.GetTickCount64.restype = ctypes.c_ulonglong
+    pc = k32.GetTickCount64() / 60000.0
+    sessao = g._minutos_de_sessao()
+    assert sessao >= 0
+    if os.environ.get("SESSIONNAME"):  # rodando na tela de um usuario: o Windows sabe quando ele entrou
+        assert sessao > 0
+    assert 0 <= g._minutos_ligado() <= pc + 1
+    original = g._minutos_de_sessao
+    try:
+        # ligou agora com a "Inicializacao rapida" do Windows 10: o tempo do PC nao zera
+        g._minutos_de_sessao = lambda: 0.5
+        assert g._minutos_ligado() <= 0.5
+        g._minutos_de_sessao = lambda: 10 ** 9
+        assert abs(g._minutos_ligado() - pc) < 1
+    finally:
+        g._minutos_de_sessao = original
+
+
+@teste
+def t_vigia_espera_o_startup_delay_so_com_o_pc_recem_ligado():
+    originais = (list(sys.argv), g.STARTUP_DELAY, g._minutos_ligado)
+    sys.argv[:] = [sys.argv[0], "--vigia"]
+    g.STARTUP_DELAY = 7
+    try:
+        g._minutos_ligado = lambda: 3  # acabou de ligar: espera, como o atalho da inicializacao
+        assert rodar_main(SE(503, -1, "x")) == [7]
+        g._minutos_ligado = lambda: 6  # fechado no meio do dia: reabre direto
+        assert rodar_main(SE(503, -1, "x")) == [60]
+    finally:
+        sys.argv[:], g.STARTUP_DELAY, g._minutos_ligado = originais
+
+
+@teste
+def t_vigia_com_reabrir_sozinho_desligado_so_remove_a_tarefa():
+    originais = (list(sys.argv), g.REABRIR_SOZINHO, g.registrar_tarefa_vigia, g.ja_esta_rodando)
+    chamadas = []
+    sys.argv[:] = [sys.argv[0], "--vigia"]
+    g.REABRIR_SOZINHO = False
+    g.registrar_tarefa_vigia = lambda: chamadas.append("registrar")
+    g.ja_esta_rodando = perigo("ja_esta_rodando")
+    try:
+        g.main()  # volta sem virar guardian
+    finally:
+        sys.argv[:], g.REABRIR_SOZINHO, g.registrar_tarefa_vigia, g.ja_esta_rodando = originais
+    assert chamadas == ["registrar"]
 
 
 # ------------------------------------------------------------ servidor local (API falsa)
