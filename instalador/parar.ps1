@@ -1,14 +1,15 @@
 # Para os Spotify Guardian rodando neste PC (versao nova e antigas):
 #   - python/pythonw/py/pyw rodando um guardian.py
 #   - guardian.exe (versao antiga feita com PyInstaller), so se a pasta dele tem config.json
-# Usado pelo instalador, pelo desinstalador e pelo guardian.py --relogin / --reiniciar
-# (que passa o proprio PID em -Exceto).
+# Usado pelo instalador, pelo desinstalador e pelo guardian.py --relogin / --reiniciar /
+# --conectar-painel / --desparear (que passa o proprio PID em -Exceto).
 #   -Pasta   : pasta do guardian novo. Se o WMI nao responder, para os Pythons
 #              que estao rodando de <Pasta>\python (plano B, sem WMI).
 #   -SoPasta : para SO o guardian que roda de <Pasta> (o instalador usa antes de
 #              copiar; os antigos, de outras pastas, so param quando o novo ja
 #              esta instalado e configurado).
-#   -SemAjudantes : nao para outras janelas --reiniciar / --relogin (usado por
+#   -SemAjudantes : nao para outras janelas --reiniciar / --relogin /
+#              --conectar-painel / --desparear (usado por
 #              elas mesmas: senao duas abertas juntas se matam e ninguem reabre
 #              o guardian). O instalador nao usa: la todas precisam fechar.
 # Compativel com o PowerShell 2.0 do Windows 7.
@@ -46,7 +47,7 @@ foreach ($p in $lista) {
     $ehGuardianPy = ($nome -match '^(pythonw?|pyw?)\.exe$') -and ($cmd -match 'guardian\.py')
     $ehGuardianExe = ($nome -ieq 'guardian.exe') -and $exe -and (Test-Path -LiteralPath (Join-Path (Split-Path $exe) 'config.json'))
     if (-not ($ehGuardianPy -or $ehGuardianExe)) { continue }
-    if ($SemAjudantes -and $cmd -match '\s--(reiniciar|relogin)\b') { continue }
+    if ($SemAjudantes -and $cmd -match '\s--(reiniciar|relogin|conectar-painel|desparear)\b') { continue }
     if (($SoPasta -or $SoAntigos) -and $raiz) {
         $daPasta = $exe.ToLower().StartsWith($raiz) -or $cmd.ToLower().Contains($raiz)
         if ($SoPasta -and -not $daPasta) { continue }

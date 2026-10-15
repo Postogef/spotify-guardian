@@ -9,12 +9,19 @@
 ;     Python atual de lado: se algo falhar, devolve o antigo e reabre o guardian.
 ;   - Reaproveita config.json e login (.cache_gef) de uma instalacao antiga
 ;     (pasta copiada na mao) e desativa o atalho antigo da inicializacao.
-;   - Em maquina nova, pede client_id / client_secret / playlist.
+;   - Pede o codigo de 6 digitos do painel Musica GEF e, depois de copiar os arquivos,
+;     pareia o PC (guardian.py --parear, pelo Python embutido: o Inno e o PowerShell do
+;     Windows 7 nao garantem TLS 1.2). Pagina pulada se o PC ja esta pareado (painel.json).
+;   - "Instalar sem o painel (avancado)": pede client_id / client_secret / playlist,
+;     como antes (modo antigo). Pagina pulada se ja ha configuracao.
 ;   - Coloca o guardian na inicializacao do Windows e ja deixa rodando.
 ;   - Se o guardian antigo estiver na inicializacao de TODOS os usuarios, pede o
 ;     aceite de administrador (UAC) so para tirar esse atalho. O resto nao precisa.
+; /CODIGO=123456 pareia com o painel sem perguntar nada (instalacao silenciosa).
 ; Parametros extras (usados nos testes): /SEMINICIAR (nao abre o guardian no fim) e
 ; /PASTACOMUM=pasta (pasta "Inicializar de todos os usuarios" de mentira, sem UAC).
+; Codigos de saida: 8 = instalou, mas o pareamento pedido falhou; 9 = o guardian novo
+; nao abriu (ver GetCustomSetupExitCode).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -79,6 +86,7 @@ Source: "{#Build}\app\guardian.py"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{userstartup}\Spotify Guardian GEF"; Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\guardian.py"""; WorkingDir: "{app}"; Comment: "Mantem a playlist do GEF tocando"
 Name: "{group}\Ver log do Spotify Guardian"; Filename: "{win}\notepad.exe"; Parameters: """{app}\guardian.log"""
 Name: "{group}\Diagnostico do Spotify"; Filename: "{app}\python\python.exe"; Parameters: """{app}\diagnostico.py"""; WorkingDir: "{app}"
+Name: "{group}\Conectar ao painel"; Filename: "{app}\python\python.exe"; Parameters: """{app}\guardian.py"" --conectar-painel"; WorkingDir: "{app}"
 Name: "{group}\Refazer login do Spotify"; Filename: "{app}\python\python.exe"; Parameters: """{app}\guardian.py"" --relogin"; WorkingDir: "{app}"
 Name: "{group}\Reiniciar Spotify Guardian"; Filename: "{app}\python\python.exe"; Parameters: """{app}\guardian.py"" --reiniciar"; WorkingDir: "{app}"
 Name: "{group}\Editar configuracao (config.json)"; Filename: "{win}\notepad.exe"; Parameters: """{app}\config.json"""
@@ -93,7 +101,7 @@ Name: "{group}\Desinstalar Spotify Guardian"; Filename: "{uninstallexe}"
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\parar.ps1"" -Pasta ""{app}"""; Flags: runhidden waituntilterminated; RunOnceId: "PararGuardian"
 
 [UninstallDelete]
-; config.json, .cache_gef (login) e os logs ficam, para uma reinstalacao
+; config.json, painel.json (pareamento), .cache_gef (login) e os logs ficam, para uma reinstalacao
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\python.anterior*"
 Type: filesandordirs; Name: "{app}\python.novo"
@@ -102,6 +110,9 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 
 [Code]
 var
+  PaginaPainel: TInputQueryWizardPage;
+  CaixaSemPainel: TNewCheckBox;
+  AvisoPainel: TNewStaticText;
   PaginaCred: TInputQueryWizardPage;
   JaDetectou: Boolean;
   AchouConfig: Boolean;
@@ -114,6 +125,10 @@ var
   GuardianIniciado: Boolean;
   TinhaPython: Boolean;        { ja havia uma versao instalada nesta pasta (atualizacao) }
   NaoAbriu: Boolean;           { 1a instalacao: o guardian novo nao abriu; o antigo foi mantido }
+  Pareou: Boolean;             { o PC foi pareado com o painel nesta instalacao }
+  PareamentoFalhou: Boolean;   { pediram o pareamento e ele nao deu certo (codigo de saida 8) }
+  PcNomePainel: String;        { nome do PC no painel (linha PCNOME= do --parear) }
+  MensagemParear: String;      { 1a linha que o --parear escreveu (o motivo, se deu errado) }
 
 const
   ChaveDesinstalar = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3C2A51-6B7D-4E0A-9C1E-5A2B7D9E4F10}_is1';
@@ -180,15 +195,24 @@ begin
   end;
 end;
 
+{ O guardian tem com o que trabalhar: config.json (modo antigo) ou painel.json (pareado).
+  Numa atualizacao (ja havia versao instalada) abre sempre: o guardian que foi fechado
+  pode estar esperando um pareamento (modo sem_conta) e precisa voltar a rodar. }
+function TemConfiguracao: Boolean;
+begin
+  Result := FileExists(PastaApp + '\config.json') or FileExists(PastaApp + '\painel.json') or
+            TinhaPython;
+end;
+
 procedure IniciarGuardian;
 var
   Codigo: Integer;
 begin
   if not DeveIniciar then
     Exit;
-  if not FileExists(PastaApp + '\config.json') then
+  if not TemConfiguracao then
   begin
-    Log('Guardian nao iniciado: falta config.json.');
+    Log('Guardian nao iniciado: falta config.json ou painel.json.');
     Exit;
   end;
   if Exec(PastaApp + '\python\pythonw.exe', '"' + PastaApp + '\guardian.py" --sem-espera',
@@ -217,7 +241,7 @@ begin
   end;
 end;
 
-{ Ja existe config.json na pasta nova ou numa instalacao antiga? }
+{ Ja existe config.json ou painel.json na pasta nova, ou config.json numa instalacao antiga? }
 function ConfigExiste: Boolean;
 var
   Estado: AnsiString;
@@ -225,7 +249,8 @@ begin
   if not JaDetectou then
   begin
     JaDetectou := True;
-    AchouConfig := FileExists(AddBackslash(WizardDirValue) + 'config.json');
+    AchouConfig := FileExists(AddBackslash(WizardDirValue) + 'config.json') or
+                   FileExists(AddBackslash(WizardDirValue) + 'painel.json');
     if not AchouConfig then
     begin
       ExtractTemporaryFile('migrar.ps1');
@@ -260,9 +285,83 @@ begin
   StringChangeEx(Result, '\', '', True);
 end;
 
+{ Codigo do painel sem espacos, pontos e tracos; '' se nao sobrarem exatamente 6
+  digitos. So isso vai para a linha de comando do Python. }
+function LimparCodigo(const S: String): String;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+    if (S[I] >= '0') and (S[I] <= '9') then
+      Result := Result + S[I]
+    else if Pos(S[I], ' .-') = 0 then
+    begin
+      Result := '';
+      Exit;
+    end;
+  if Length(Result) <> 6 then
+    Result := '';
+end;
+
+{ Marcaram "Instalar sem o painel": modo antigo, com Client ID e Client Secret. }
+function SemPainel: Boolean;
+begin
+  Result := False;
+  if CaixaSemPainel <> nil then
+    Result := CaixaSemPainel.Checked;
+end;
+
+{ Codigo digitado na pagina do painel (ou /CODIGO=); '' = nao parear. }
+function CodigoPedido: String;
+begin
+  Result := '';
+  if (PaginaPainel <> nil) and not SemPainel then
+    Result := Trim(PaginaPainel.Values[0]);
+end;
+
+{ O PC ja foi pareado e depois desconectado do painel (o guardian esta esperando um codigo novo). }
+function PcDesconectado: Boolean;
+begin
+  Result := FileExists(AddBackslash(WizardDirValue) + 'painel.json.revogado');
+end;
+
+procedure AtualizarPaginaPainel(Sender: TObject);
+begin
+  PaginaPainel.Edits[0].Enabled := not SemPainel;
+  { sem o painel e sem configuracao, a proxima pagina e a do Client ID / Client Secret }
+  if SemPainel and not ConfigExiste then
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonNext)
+  else
+    WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall);
+end;
+
 procedure InitializeWizard;
 begin
-  PaginaCred := CreateInputQueryPage(wpSelectDir,
+  PaginaPainel := CreateInputQueryPage(wpSelectDir,
+    'Conectar ao painel Música GEF',
+    'Código de pareamento deste PC',
+    'No painel Música GEF, abra a página deste PC e copie o código de pareamento. ' +
+    'O código vale 24 horas e só pode ser usado uma vez.');
+  PaginaPainel.Add('Código do painel (6 dígitos):', False);
+  PaginaPainel.Values[0] := ExpandConstant('{param:CODIGO|}');
+
+  CaixaSemPainel := TNewCheckBox.Create(PaginaPainel);
+  CaixaSemPainel.Top := PaginaPainel.Edits[0].Top + PaginaPainel.Edits[0].Height + ScaleY(20);
+  CaixaSemPainel.Width := PaginaPainel.SurfaceWidth;
+  CaixaSemPainel.Height := ScaleY(17);
+  CaixaSemPainel.Caption := 'Instalar sem o painel (avançado: Client ID e Client Secret)';
+  CaixaSemPainel.OnClick := @AtualizarPaginaPainel;
+  CaixaSemPainel.Parent := PaginaPainel.Surface;
+
+  AvisoPainel := TNewStaticText.Create(PaginaPainel);
+  AvisoPainel.AutoSize := False;
+  AvisoPainel.WordWrap := True;
+  AvisoPainel.Top := CaixaSemPainel.Top + CaixaSemPainel.Height + ScaleY(16);
+  AvisoPainel.Width := PaginaPainel.SurfaceWidth;
+  AvisoPainel.Parent := PaginaPainel.Surface;
+
+  PaginaCred := CreateInputQueryPage(PaginaPainel.ID,
     'Dados do Spotify deste posto',
     'Nao achei uma configuracao anterior neste computador.',
     'Copie os dados do app no painel do Spotify for Developers ' +
@@ -276,13 +375,41 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
+  if (PaginaPainel <> nil) and (PageID = PaginaPainel.ID) then
+  begin
+    { a procura por uma instalacao antiga (ate 20 s) roda aqui, antes de a pagina
+      aparecer: o aviso dela depende disso }
+    ConfigExiste;
+    Result := FileExists(AddBackslash(WizardDirValue) + 'painel.json');
+  end;
   if (PaginaCred <> nil) and (PageID = PaginaCred.ID) then
-    Result := ConfigExiste;
+    Result := ConfigExiste or not SemPainel;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  { instalacao silenciosa (a atualizacao automatica) nunca para pedindo nada:
+    sem /CODIGO= ela so nao pareia }
+  if WizardSilent then
+    Exit;
+  if (PaginaPainel <> nil) and (CurPageID = PaginaPainel.ID) and not SemPainel then
+  begin
+    if CodigoPedido = '' then
+    begin
+      { em branco: so pergunta se nao ha uma configuracao para continuar como esta }
+      if not ConfigExiste or PcDesconectado then
+        Result := MsgBox('Continuar sem conectar ao painel?' + #13#10#13#10 +
+          'O Spotify Guardian fica instalado, mas só cuida da música depois de conectado ' +
+          '(menu Iniciar > Spotify Guardian > Conectar ao painel).',
+          mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+    end
+    else if LimparCodigo(CodigoPedido) = '' then
+    begin
+      MsgBox('O código do painel tem 6 dígitos (só números).', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
   if (PaginaCred <> nil) and (CurPageID = PaginaCred.ID) then
   begin
     if not EhHex32(Trim(PaginaCred.Values[0])) or not EhHex32(Trim(PaginaCred.Values[1])) then
@@ -539,6 +666,214 @@ begin
   end;
 end;
 
+{ O guardian novo nao abriu (ou o Python novo nem rodou). Atualizacao: volta para a
+  versao anterior. 1a instalacao: mantem o guardian antigo, se havia. }
+procedure NovoNaoAbriu(const JaTinhaAtalhos: Boolean);
+begin
+  RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoPasta');
+  if TinhaPython then
+  begin
+    Log('Voltando para a versao anterior.');
+    { a "versao anterior" pode ser uma 1a instalacao que nunca abriu (instalador
+      rodado de novo): se foi ESTA instalacao que tirou o guardian antigo da
+      inicializacao, religa os atalhos dele }
+    if not JaTinhaAtalhos and TemAtalhosGuardados then
+      RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
+    VoltouVersao := True;
+    Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
+  end;
+  { 1a instalacao: o guardian antigo nem foi parado; religa os atalhos dele }
+  Log('Mantendo o guardian antigo.');
+  RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
+  NaoAbriu := True;
+  GuardianIniciado := False;
+  ConfirmarInstalacao;
+  SuppressibleMsgBox('O Spotify Guardian novo nao abriu neste computador.' + #13#10 +
+    'O guardian antigo (se havia) continua funcionando.' + #13#10#13#10 +
+    'Veja o guardian.log na pasta ' + PastaApp, mbError, MB_OK, IDOK);
+end;
+
+{ Recebe a saida do guardian.py --parear linha a linha (vai tambem para o log de
+  instalacao; o --parear nunca escreve o codigo nem o token). }
+procedure LerSaidaParear(const S: String; const Error, FirstLine: Boolean);
+begin
+  Log('guardian.py --parear: ' + S);
+  if Error or (Trim(S) = '') then
+    Exit;
+  if Copy(S, 1, 7) = 'PCNOME=' then
+    PcNomePainel := Trim(Copy(S, 8, Length(S)))
+  else if (MensagemParear = '') and (Copy(S, 1, 10) <> 'RESULTADO=') then
+    MensagemParear := Trim(S);
+end;
+
+{ Roda "guardian.py --parear CODIGO" com o Python embutido (o Inno e o PowerShell do
+  Windows 7 nao garantem TLS 1.2). Devolve o codigo de saida dele (0 ok, 2 formato,
+  3 codigo invalido, 4 rede, 5 resposta, 6 gravacao, 7 URL) ou -1 se nem rodou. }
+function RodarParear(const Codigo: String): Integer;
+var
+  Saida: Integer;
+begin
+  MensagemParear := '';
+  PcNomePainel := '';
+  Log('Conectando ao painel (guardian.py --parear).');
+  try
+    if not ExecAndLogOutput(PastaApp + '\python\python.exe',
+                            '"' + PastaApp + '\guardian.py" --parear ' + Codigo,
+                            PastaApp, SW_HIDE, ewWaitUntilTerminated, Saida, @LerSaidaParear) then
+    begin
+      Log('ERRO ao rodar o Python embutido: ' + SysErrorMessage(Saida));
+      Saida := -1;
+    end;
+  except
+    Log('ERRO ao rodar o Python embutido: ' + GetExceptionMessage);
+    Saida := -1;
+  end;
+  Log(Format('guardian.py --parear -> %d', [Saida]));
+  Result := Saida;
+end;
+
+{ Janela para digitar o codigo de novo (o anterior nao deu certo). False = Pular. }
+function PedirOutroCodigo(const Problema: String; var Codigo: String): Boolean;
+var
+  Form: TSetupForm;
+  Texto: TNewStaticText;
+  Edit: TNewEdit;
+  Conectar, Pular: TNewButton;
+  W: Integer;
+begin
+  Form := CreateCustomForm(ScaleX(420), ScaleY(200), True, True);
+  try
+    Form.Caption := 'Conectar ao painel Música GEF';
+
+    Texto := TNewStaticText.Create(Form);
+    Texto.AutoSize := False;
+    Texto.WordWrap := True;
+    Texto.Left := ScaleX(10);
+    Texto.Top := ScaleY(10);
+    Texto.Width := Form.ClientWidth - ScaleX(20);
+    Texto.Caption := Problema + #13#10#13#10 +
+      'Digite o código de 6 dígitos e clique em Conectar. Para terminar a instalação sem ' +
+      'conectar, clique em Pular (dá para conectar depois: menu Iniciar > Spotify Guardian > ' +
+      'Conectar ao painel).';
+    Texto.Parent := Form;
+    Texto.AdjustHeight;
+
+    Edit := TNewEdit.Create(Form);
+    Edit.Left := ScaleX(10);
+    Edit.Top := Texto.Top + Texto.Height + ScaleY(12);
+    Edit.Width := ScaleX(120);
+    Edit.Text := Codigo;
+    Edit.Parent := Form;
+
+    Form.ClientHeight := Edit.Top + Edit.Height + ScaleY(16 + 23 + 10);
+
+    Conectar := TNewButton.Create(Form);
+    Conectar.Caption := 'Conectar';
+    Conectar.ModalResult := mrOk;
+    Conectar.Default := True;
+    Conectar.Parent := Form;
+
+    Pular := TNewButton.Create(Form);
+    Pular.Caption := 'Pular';
+    Pular.ModalResult := mrCancel;
+    Pular.Cancel := True;
+    Pular.Parent := Form;
+
+    W := Form.CalculateButtonWidth([Conectar.Caption, Pular.Caption]);
+    Conectar.Width := W;
+    Pular.Width := W;
+    Conectar.Height := ScaleY(23);
+    Pular.Height := ScaleY(23);
+    Pular.Left := Form.ClientWidth - ScaleX(10) - W;
+    Conectar.Left := Pular.Left - ScaleX(6) - W;
+    Conectar.Top := Form.ClientHeight - ScaleY(23 + 10);
+    Pular.Top := Conectar.Top;
+
+    Form.ActiveControl := Edit;
+    Form.FlipAndCenterIfNeeded(True, WizardForm, False);
+    Result := Form.ShowModal = mrOk;
+    if Result then
+      Codigo := Trim(Edit.Text);
+  finally
+    Form.Free;
+  end;
+end;
+
+{ Pareia o PC com o painel. Codigo errado ou sem rede: deixa digitar de novo ou
+  pular. Instalacao silenciosa nunca abre janela: sem rede tenta 3 vezes, o resto
+  desiste (codigo de saida 8). Devolve False so se o Python embutido nem rodou:
+  ai o guardian novo tambem nao abriria. }
+function Parear(Codigo: String): Boolean;
+var
+  Saida, Tentativas: Integer;
+  Problema: String;
+begin
+  Result := True;
+  Tentativas := 0;
+  while True do
+  begin
+    Tentativas := Tentativas + 1;
+    if LimparCodigo(Codigo) = '' then
+    begin
+      Log('Codigo do painel com formato invalido (precisa ter 6 digitos).');
+      MensagemParear := '';
+      Saida := 2;
+    end
+    else
+      Saida := RodarParear(LimparCodigo(Codigo));
+    case Saida of
+      0: begin
+           Pareou := True;
+           Exit;
+         end;
+      2: Problema := 'O código do painel tem 6 dígitos (só números).';
+      3: Problema := 'Código inválido, vencido ou já usado. Gere um código novo na página deste PC no painel.';
+      4: begin
+           Problema := 'Sem conexão com o painel Música GEF. Confira a internet deste computador e tente de novo.';
+           if MensagemParear <> '' then
+             Problema := Problema + #13#10#13#10 + 'Detalhe: ' + MensagemParear;
+         end;
+      5, 6, 7:
+         begin
+           PareamentoFalhou := True;
+           if not WizardSilent then
+             MsgBox('Não foi possível conectar este PC ao painel Música GEF:' + #13#10 + MensagemParear + #13#10#13#10 +
+                    'A instalação continua sem o painel. Para conectar depois: menu Iniciar > ' +
+                    'Spotify Guardian > Conectar ao painel.', mbError, MB_OK);
+           Exit;
+         end;
+    else
+      begin
+        { nem o Python rodou (DLL faltando, biblioteca quebrada...) }
+        PareamentoFalhou := True;
+        Result := False;
+        Exit;
+      end;
+    end;
+    if WizardSilent then
+    begin
+      if (Saida <> 4) or (Tentativas >= 3) then
+      begin
+        Log('Pareamento com o painel nao foi feito.');
+        PareamentoFalhou := True;
+        Exit;
+      end;
+      Sleep(10000);
+    end
+    else
+    begin
+      if Saida <> 4 then
+        Codigo := '';   { sem rede: deixa o mesmo codigo, e so clicar em Conectar de novo }
+      if not PedirOutroCodigo(Problema, Codigo) then
+      begin
+        Log('Pareamento com o painel pulado.');
+        PareamentoFalhou := True;
+        Exit;
+      end;
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Config: String;
@@ -564,16 +899,24 @@ begin
     JaTinhaAtalhos := TemAtalhosGuardados;
     RodarPS(PastaApp + '\migrar.ps1',
             ParamsMigrar(PastaApp, 'Migrar') + ' -Estado "' + ArquivoEstado + '"');
-    if not FileExists(Config) and (PaginaCred <> nil) and EhHex32(Trim(PaginaCred.Values[0])) then
+    if not FileExists(Config) and SemPainel and (PaginaCred <> nil) and EhHex32(Trim(PaginaCred.Values[0])) then
     begin
       if SaveStringToFile(Config, MontarConfig, False) then
         Log('config.json criado com os dados informados.')
       else
         Log('ERRO ao gravar config.json.');
     end;
-    if not FileExists(Config) then
+    { pareia so agora: com o Python novo no lugar e o config.json antigo ja migrado }
+    if CodigoPedido <> '' then
+      if not Parear(CodigoPedido) then
+      begin
+        Log('O Python novo nao rodou o guardian.py --parear.');
+        NovoNaoAbriu(JaTinhaAtalhos);
+        Exit;
+      end;
+    if not TemConfiguracao then
     begin
-      Log('ATENCAO: instalado sem config.json; guardian nao iniciado.');
+      Log('ATENCAO: instalado sem config.json e sem painel.json; guardian nao iniciado.');
       ConfirmarInstalacao;
       Exit;
     end;
@@ -582,27 +925,8 @@ begin
       pasta) depois que o novo abriu mesmo. Senao a loja ficaria sem guardian. }
     if DeveIniciar and not GuardianSubiu(EsperaGuardian) then
     begin
-      RodarPS(PastaApp + '\parar.ps1', '-Pasta "' + PastaApp + '" -SoPasta');
-      if TinhaPython then
-      begin
-        Log('O guardian novo nao abriu a tempo: voltando para a versao anterior.');
-        { a "versao anterior" pode ser uma 1a instalacao que nunca abriu (instalador
-          rodado de novo): se foi ESTA instalacao que tirou o guardian antigo da
-          inicializacao, religa os atalhos dele }
-        if not JaTinhaAtalhos and TemAtalhosGuardados then
-          RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
-        VoltouVersao := True;
-        Exit;  { InstalouOk continua False: o DeinitializeSetup restaura a versao anterior }
-      end;
-      { 1a instalacao: o guardian antigo nem foi parado; religa os atalhos dele }
-      Log('O guardian novo nao abriu a tempo: mantendo o guardian antigo.');
-      RodarPS(PastaApp + '\migrar.ps1', ParamsMigrar(PastaApp, 'Desfazer'));
-      NaoAbriu := True;
-      GuardianIniciado := False;
-      ConfirmarInstalacao;
-      SuppressibleMsgBox('O Spotify Guardian novo nao abriu neste computador.' + #13#10 +
-        'O guardian antigo (se havia) continua funcionando.' + #13#10#13#10 +
-        'Veja o guardian.log na pasta ' + PastaApp, mbError, MB_OK, IDOK);
+      Log('O guardian novo nao abriu a tempo.');
+      NovoNaoAbriu(JaTinhaAtalhos);
       Exit;
     end;
     { o novo abriu: agora sim para os guardians antigos (de outras pastas) }
@@ -667,16 +991,71 @@ begin
 end;
 
 { Codigo de saida 9 = instalou, mas o guardian novo nao abriu e a versao anterior
-  voltou (fica claro no atualizacao.log e para quem roda o instalador em lote). }
+  voltou (fica claro no atualizacao.log e para quem roda o instalador em lote).
+  Codigo de saida 8 = instalou, mas o pareamento com o painel pedido (codigo na
+  pagina ou /CODIGO=) nao deu certo. }
 function GetCustomSetupExitCode: Integer;
 begin
   Result := 0;
   if VoltouVersao or NaoAbriu then
-    Result := 9;
+    Result := 9
+  else if PareamentoFalhou then
+    Result := 8;
+end;
+
+{ O guardian vai rodar no modo antigo (login do Spotify no navegador deste PC)?
+  Igual ao decidir_modo do guardian.py: nunca pareado e config.json com client_id.
+  O Bloco de Notas pode salvar o config.json em "Unicode" (UTF-16): ai cada letra
+  vem seguida (ou precedida) de um byte 0. }
+function ModoLegado: Boolean;
+var
+  Texto: AnsiString;
+begin
+  Result := False;
+  if FileExists(ExpandConstant('{app}\painel.json')) or FileExists(ExpandConstant('{app}\painel.json.revogado')) then
+    Exit;
+  if LoadStringFromFile(ExpandConstant('{app}\config.json'), Texto) then
+    Result := (Pos('client_id', Texto) > 0) or
+              (Pos('c'#0'l'#0'i'#0'e'#0'n'#0't'#0'_'#0'i'#0'd'#0, Texto) > 0);
+end;
+
+{ Frase da tela final sobre o painel ('' no modo antigo). }
+function SituacaoPainel: String;
+begin
+  Result := '';
+  if Pareou then
+  begin
+    Result := 'Este PC foi conectado ao painel Música GEF';
+    if PcNomePainel <> '' then
+      Result := Result + ' como "' + PcNomePainel + '"';
+    Result := Result + '.';
+  end
+  else if PareamentoFalhou then
+    Result := 'ATENÇÃO: este PC NÃO foi conectado ao painel Música GEF. Para conectar, gere um ' +
+              'código no painel e use menu Iniciar > Spotify Guardian > Conectar ao painel.'
+  else if FileExists(ExpandConstant('{app}\painel.json')) then
+    Result := 'Este PC está conectado ao painel Música GEF.'
+  else if not ModoLegado then
+    Result := 'Este PC ainda não está conectado ao painel Música GEF: o Spotify Guardian só cuida ' +
+              'da música depois disso (menu Iniciar > Spotify Guardian > Conectar ao painel).';
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
+var
+  Extra: String;
 begin
+  if (PaginaPainel <> nil) and (CurPageID = PaginaPainel.ID) then
+  begin
+    if PcDesconectado then
+      AvisoPainel.Caption := 'Este PC foi desconectado do painel. Digite um código novo para conectá-lo de novo.'
+    else if ConfigExiste then
+      AvisoPainel.Caption := 'Este computador já tem uma configuração do Spotify Guardian (modo antigo, ' +
+        'sem o painel). Deixe o código em branco para continuar como está.'
+    else
+      AvisoPainel.Caption := '';
+    AvisoPainel.AdjustHeight;
+    AtualizarPaginaPainel(nil);
+  end;
   if (PaginaCred <> nil) and (CurPageID = PaginaCred.ID) then
     WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall);
   if (CurPageID = wpFinished) and VoltouVersao then
@@ -690,11 +1069,21 @@ begin
       'Reinicie o computador e rode o instalador de novo.';
     WizardForm.AdjustLabelHeight(WizardForm.FinishedLabel);
   end
-  else if (CurPageID = wpFinished) and GuardianIniciado and not FileExists(ExpandConstant('{app}\.cache_gef')) then
+  else if CurPageID = wpFinished then
   begin
-    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
-      'PRIMEIRO USO: o navegador vai abrir para o login do Spotify. ' +
-      'Entre com a conta Spotify DESTE posto e clique em Concordo/Autorizar.';
-    WizardForm.AdjustLabelHeight(WizardForm.FinishedLabel);
+    Extra := SituacaoPainel;
+    { so no modo antigo: no modo painel o login do Spotify e feito no painel }
+    if GuardianIniciado and ModoLegado and not FileExists(ExpandConstant('{app}\.cache_gef')) then
+    begin
+      if Extra <> '' then
+        Extra := Extra + #13#10#13#10;
+      Extra := Extra + 'PRIMEIRO USO: o navegador vai abrir para o login do Spotify. ' +
+        'Entre com a conta Spotify DESTE posto e clique em Concordo/Autorizar.';
+    end;
+    if Extra <> '' then
+    begin
+      WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 + Extra;
+      WizardForm.AdjustLabelHeight(WizardForm.FinishedLabel);
+    end;
   end;
 end;

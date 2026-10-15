@@ -1,0 +1,17 @@
+{
+  "descricao": "Vetores compartilhados: normalizar_playlist (guardian.py) e normalizarPlaylist (painel). Copia identica em SpotifyGuardian/testes/vetores/uris-v1.json.",
+  "regexValida": "^spotify:playlist:[0-9A-Za-z]{22}$",
+  "casos": [
+    { "entrada": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt?si=x", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": "https://open.spotify.com/playlist/4p3LjEkrRzUVQeCOmiLDSt?si=abc123", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": "https://open.spotify.com/intl-pt/playlist/4p3LjEkrRzUVQeCOmiLDSt?si=a&pi=b", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": "https://open.spotify.com/playlist/4p3LjEkrRzUVQeCOmiLDSt/", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": " 4p3LjEkrRzUVQeCOmiLDSt ", "saida": "spotify:playlist:4p3LjEkrRzUVQeCOmiLDSt", "valida": true },
+    { "entrada": "https://open.spotify.com/album/1ATL5GLyefJaxhQzSPVrLX", "saida": "https://open.spotify.com/album/1ATL5GLyefJaxhQzSPVrLX", "valida": false },
+    { "entrada": "spotify:track:4uLU6hMCjMI75M1A2tKUQC", "saida": "spotify:track:4uLU6hMCjMI75M1A2tKUQC", "valida": false },
+    { "entrada": "spotify:playlist:curta", "saida": "spotify:playlist:curta", "valida": false },
+    { "entrada": "", "saida": "", "valida": false },
+    { "entrada": null, "saida": "", "valida": false }
+  ]
+}

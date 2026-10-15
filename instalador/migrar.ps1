@@ -3,7 +3,7 @@
 #
 #   -Modo Detectar : so procura. Grava em -Estado "SIM" (achou config) ou "NAO"
 #                    na 1a linha e o caminho da pasta antiga na 2a.
-#   -Modo Migrar   : na 1a instalacao (pasta nova sem config.json), copia
+#   -Modo Migrar   : na 1a instalacao (pasta nova sem config.json nem painel.json), copia
 #                    config.json e .cache_gef (login) da pasta antiga. Em toda
 #                    instalacao/atualizacao, tira os atalhos antigos da
 #                    inicializacao e remove entradas antigas do Registro (Run).
@@ -28,7 +28,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 $Novo = $Novo.TrimEnd('\')
 $ArqLog = Join-Path $Novo 'instalacao.log'
 $ChaveRun = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$TemConfigNova = Test-Path -LiteralPath (Join-Path $Novo 'config.json')
+# painel.json = PC ja pareado com o painel Musica GEF: tambem e configuracao (nada vem de pasta antiga)
+$TemConfigNova = (Test-Path -LiteralPath (Join-Path $Novo 'config.json')) -or (Test-Path -LiteralPath (Join-Path $Novo 'painel.json'))
 $Avisos = @()
 $WmiTravou = $false
 
@@ -264,7 +265,7 @@ if ($TemConfigNova) {
     # Atualizacao/reinstalacao: nao traz nada de pasta antiga. Se o .cache_gef
     # sumiu foi de proposito (login expirado, --relogin) e a pasta antiga pode
     # ate ser de outro posto.
-    Registrar 'config.json ja existe na pasta nova; nada copiado de instalacao antiga.'
+    Registrar 'config.json ou painel.json ja existe na pasta nova; nada copiado de instalacao antiga.'
 } elseif ($Melhor) {
     Registrar ('Instalacao antiga encontrada em: ' + $Melhor)
     $copias = @(

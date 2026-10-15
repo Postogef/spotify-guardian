@@ -4,6 +4,9 @@ config*.json
 .cache*
 *.cache_gef
 atualizacao_estado.json
+# identidade do PC no painel Musica GEF (token protegido), estado do painel e pareamentos desfeitos
+painel*.json
+*.revogado
 # pastas das instalacoes antigas de cada posto (tem config.json com senhas), e copias/zips delas
 SpotifyGuardian Gef*
 *.zip
